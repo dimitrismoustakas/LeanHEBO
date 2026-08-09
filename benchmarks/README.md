@@ -89,7 +89,8 @@ uv run python -m benchmarks.quality.compare_results `
 
 The comparator pairs every case and seed, calls `assert_matched_work`, and refuses a mismatch. It
 reports failures, duplicates, normalized regret, phase-specific ratios, and deterministic paired
-bootstrap 95% intervals. Missing seeds and old result schemas also fail closed.
+bootstrap 95% intervals. Missing seeds and malformed or structurally stale work contracts also
+fail closed.
 
 The persistent lane intentionally measures LeanHEBO's shorter updates and reuse against upstream's
 cold reconstruction. Generate Lean results with `--model-lifecycle persistent`, the desired update
