@@ -33,6 +33,18 @@ def test_non_dominated_sort_assigns_expected_fronts() -> None:
     assert [front.tolist() for front in fronts] == [[0, 1, 2], [3], [4]]
 
 
+def test_dominance_matrix_matches_strict_pairwise_reference_with_ties() -> None:
+    generator = torch.Generator().manual_seed(83)
+    for _ in range(20):
+        # A small integer range deliberately creates duplicate rows and tied coordinates.
+        objectives = torch.randint(-2, 3, (64, 4), generator=generator).to(torch.float32)
+        no_worse = (objectives[:, None, :] <= objectives[None, :, :]).all(dim=-1)
+        strictly_better = (objectives[:, None, :] < objectives[None, :, :]).any(dim=-1)
+        expected = no_worse & strictly_better
+
+        assert torch.equal(dominance_matrix(objectives), expected)
+
+
 def test_crowding_distance_is_normalized_with_infinite_boundaries() -> None:
     objectives = torch.tensor([[0.0, 2.0], [1.0, 1.0], [2.0, 0.0]])
 

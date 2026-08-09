@@ -30,8 +30,10 @@ def dominance_matrix(objectives: Tensor) -> Tensor:
 
     _validate_objectives(objectives)
     no_worse = (objectives[:, None, :] <= objectives[None, :, :]).all(dim=-1)
-    strictly_better = (objectives[:, None, :] < objectives[None, :, :]).any(dim=-1)
-    return no_worse & strictly_better
+    # For finite values, i is strictly better than j in at least one objective exactly when
+    # i is no worse than j but j is not no worse than i. Reusing the transpose avoids a second
+    # population-by-population-by-objective comparison without changing tie behavior.
+    return no_worse & ~no_worse.mT
 
 
 def _sort_from_dominance(dominates: Tensor) -> tuple[Tensor, list[Tensor]]:

@@ -359,6 +359,42 @@ def test_mixed_gp_posterior_and_state_round_trip() -> None:
     torch.testing.assert_close(restored_variance, variance)
 
 
+def test_predict_skips_redundant_eval_walks_and_corrects_training_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gp = _surrogate()
+    continuous = torch.linspace(0, 1, 6).reshape(-1, 1)
+    categorical = torch.empty((6, 0), dtype=torch.long)
+    targets = torch.sin(continuous[:, 0])
+    gp.fit(continuous, categorical, targets, transform_version=1)
+    assert gp.model is not None and gp.likelihood is not None
+
+    eval_calls: list[torch.nn.Module] = []
+    module_eval = torch.nn.Module.eval
+
+    def tracked_eval(module: torch.nn.Module) -> torch.nn.Module:
+        eval_calls.append(module)
+        return module_eval(module)
+
+    monkeypatch.setattr(torch.nn.Module, "eval", tracked_eval)
+
+    gp.predict(continuous[:2], categorical[:2])
+    assert eval_calls == []
+
+    gp.model.train()
+    assert gp.model.training and gp.likelihood.training
+    gp.predict(continuous[:2], categorical[:2])
+    assert eval_calls == [gp.model]
+    assert not gp.model.training and not gp.likelihood.training
+
+    eval_calls.clear()
+    gp.likelihood.train()
+    assert not gp.model.training and gp.likelihood.training
+    gp.predict(continuous[:2], categorical[:2])
+    assert eval_calls == [gp.likelihood]
+    assert not gp.model.training and not gp.likelihood.training
+
+
 def test_numeric_lengthscale_uses_median_of_all_pairwise_distances() -> None:
     extractor = MixedFeatureExtractor(1, ())
     kernel = build_kernel(num_continuous=1, feature_extractor=extractor, ard=True)

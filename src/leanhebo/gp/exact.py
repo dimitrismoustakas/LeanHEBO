@@ -619,8 +619,10 @@ class ExactGPSurrogate:
         if self.model is None or self.likelihood is None:
             raise RuntimeError("the GP has not been fitted")
         continuous, categorical = self._prepare_prediction_inputs(continuous, categorical)
-        self.model.eval()
-        self.likelihood.eval()
+        if self.model.training:
+            self.model.eval()
+        if self.likelihood.training:
+            self.likelihood.eval()
         self.posterior_calls += 1
         if self.diagnostics is not None:
             self.diagnostics.increment("posterior.calls")
