@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator
+from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator, PosteriorStats
 
 
 class _CountingPosterior:
@@ -79,6 +79,35 @@ def test_mace_is_finite_and_reproducible_with_dedicated_generator() -> None:
     assert first.shape == (3, 3)
     assert torch.isfinite(first).all()
     torch.testing.assert_close(first, second)
+
+
+def test_mace_matches_pinned_upstream_fixed_seed_golden_trace() -> None:
+    """Golden values were generated with HEBO ee6112d and Torch 2.13.0."""
+
+    mean = torch.tensor([-5.0, 0.1, 2.0])
+    variance = torch.tensor([0.01, 0.25, 1.0])
+    stats = PosteriorStats(
+        mean=mean,
+        variance=variance,
+        stddev=variance.sqrt(),
+        noise_variance=torch.tensor(0.01),
+    )
+    evaluator = MACEEvaluator(
+        PosteriorEvaluator(_CountingPosterior()),
+        best_y=0.2,
+        kappa=2.0,
+        generator=torch.Generator().manual_seed(11),
+    )
+
+    actual = evaluator.from_stats(stats)
+    expected = torch.tensor(
+        [
+            [-5.0956830978393555, -1.6834450960159302, -0.0],
+            [-0.6248040199279785, 1.2124518156051636, 0.45422089099884033],
+            [-0.09893012046813965, 4.1540656089782715, 3.24324107170105],
+        ]
+    )
+    torch.testing.assert_close(actual, expected, rtol=2e-6, atol=2e-6)
 
 
 def test_mace_deterministic_mode_does_not_advance_generator() -> None:

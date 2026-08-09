@@ -33,6 +33,8 @@ class UpstreamManifest:
     package_subdirectory: str
     import_name: str
     python: str
+    dependency_lock: str
+    dependency_lock_sha256: str
     requirements_sha256: str
     setup_sha256: str
     development_only: bool
@@ -50,6 +52,8 @@ class UpstreamManifest:
             package_subdirectory=_required_string(raw, "package_subdirectory"),
             import_name=_required_string(raw, "import_name"),
             python=_required_string(raw, "python"),
+            dependency_lock=_required_string(raw, "dependency_lock"),
+            dependency_lock_sha256=_required_string(raw, "dependency_lock_sha256"),
             requirements_sha256=_required_string(raw, "requirements_sha256"),
             setup_sha256=_required_string(raw, "setup_sha256"),
             development_only=raw.get("development_only") is True,
@@ -59,6 +63,7 @@ class UpstreamManifest:
         ):
             raise ValueError("upstream commit must be a full lowercase Git SHA")
         for name, digest in (
+            ("dependency_lock_sha256", manifest.dependency_lock_sha256),
             ("requirements_sha256", manifest.requirements_sha256),
             ("setup_sha256", manifest.setup_sha256),
         ):
@@ -66,6 +71,8 @@ class UpstreamManifest:
                 raise ValueError(f"{name} must be a lowercase SHA-256 digest")
         if Path(manifest.package_subdirectory).is_absolute():
             raise ValueError("package_subdirectory must be relative")
+        if Path(manifest.dependency_lock).is_absolute():
+            raise ValueError("dependency_lock must be relative")
         if not manifest.development_only:
             raise ValueError("the upstream baseline must remain development-only")
         return manifest
@@ -157,8 +164,14 @@ def _ensure_environment(
     if not interpreter.exists():
         environment.parent.mkdir(parents=True, exist_ok=True)
         _run([uv, "venv", str(environment), "--python", python])
+    lock = (_HERE / manifest.dependency_lock).resolve()
+    if _HERE.resolve() not in lock.parents:
+        raise ValueError("dependency_lock escapes the environment manifest directory")
+    _verify_digest(lock, manifest.dependency_lock_sha256)
+    _run([uv, "pip", "install", "--python", str(interpreter), "-r", str(lock)])
     package = (checkout / manifest.package_subdirectory).resolve()
-    _run([uv, "pip", "install", "--python", str(interpreter), str(package)])
+    _run([uv, "pip", "install", "--python", str(interpreter), "--no-deps", str(package)])
+    _run([uv, "pip", "check", "--python", str(interpreter)])
     _run(
         [
             str(interpreter),
@@ -183,6 +196,8 @@ def _write_receipt(
         "name": manifest.name,
         "repository": manifest.repository,
         "commit": manifest.commit,
+        "dependency_lock": manifest.dependency_lock,
+        "dependency_lock_sha256": manifest.dependency_lock_sha256,
         "checkout": str(checkout.resolve()),
         "python": None if interpreter is None else str(interpreter.resolve()),
     }

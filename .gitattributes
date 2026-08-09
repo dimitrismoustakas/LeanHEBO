@@ -1,0 +1,3 @@
+# Keep source and checksum-pinned benchmark inputs byte-stable across platforms.
+* text=auto eol=lf
+

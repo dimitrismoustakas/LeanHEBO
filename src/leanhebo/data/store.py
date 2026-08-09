@@ -98,11 +98,13 @@ class ObservationStore:
 
     @property
     def encoded_chunks(self) -> tuple[EncodedBatch, ...]:
-        return tuple(self._x_chunks)
+        with self._lock:
+            return tuple(chunk.clone() for chunk in self._x_chunks)
 
     @property
     def y_chunks(self) -> tuple[torch.Tensor, ...]:
-        return tuple(self._y_chunks)
+        with self._lock:
+            return tuple(chunk.clone() for chunk in self._y_chunks)
 
     @property
     def records(self) -> list[dict[str, object]] | None:
@@ -133,7 +135,10 @@ class ObservationStore:
         else:
             encoded = self.space.encode(x)
         outcomes = self._coerce_outcomes(y, expected_rows=len(encoded))
-        encoded = encoded.to(self.device, dtype=self.dtype).detach()
+        # Observation history is append-only. CandidateBatch avoids codec and adapter work,
+        # but the store still owns a snapshot so later caller mutation cannot rewrite history
+        # while leaving canonical keys and materialized caches inconsistent.
+        encoded = encoded.to(self.device, dtype=self.dtype).detach().clone()
         finite = torch.isfinite(outcomes)
         invalid_count = int((~finite).sum().item())
         if invalid_count and self.nonfinite == "raise":
@@ -154,7 +159,7 @@ class ObservationStore:
             records = ()
         with self._lock:
             self._x_chunks.append(encoded)
-            self._y_chunks.append(outcomes.detach())
+            self._y_chunks.append(outcomes.detach().clone())
             if self.retain_decoded:
                 self._decoded_chunks.append(records)
             self._keys.add(encoded)
@@ -211,6 +216,35 @@ class ObservationStore:
         with self._lock:
             return self._keys.add(encoded)
 
+    def key_snapshot(self) -> tuple[tuple[int, ...], ...]:
+        """Return all observed and reserved canonical keys for checkpointing."""
+
+        with self._lock:
+            return self._keys.snapshot()
+
+    def restore_keys(self, keys: object) -> int:
+        """Restore validated observed or reserved keys from a checkpoint."""
+
+        with self._lock:
+            return self._keys.add_canonical(keys)
+
+    def restore_versions(self, observation_version: object, transform_version: object) -> None:
+        """Restore exact monotonic counters after rebuilding checkpoint chunks."""
+
+        def validated(value: object, name: str) -> int:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"checkpoint {name} is invalid")
+            return value
+
+        restored_observation_version = validated(observation_version, "observation_version")
+        restored_transform_version = validated(transform_version, "transform_version")
+        with self._lock:
+            self.observation_version = restored_observation_version
+            self.transform_version = restored_transform_version
+            if self._transformed_y is not None:
+                self._transformed_observation_version = restored_observation_version
+            self._cache = None
+
     def unique_mask(
         self, value: CandidateBatch | EncodedBatch, *, include_pending: bool = True
     ) -> torch.Tensor:
@@ -223,8 +257,8 @@ class ObservationStore:
         with self._lock:
             return self._keys.unique_mask(encoded, include_pending=include_pending)
 
-    def materialize(self) -> ObservationBatch:
-        """Concatenate chunks only when a model-ready view is requested."""
+    def _materialize_view(self) -> ObservationBatch:
+        """Return the cached internal view; callers must not expose or mutate it."""
 
         with self._lock:
             if self._cache is not None:
@@ -251,6 +285,19 @@ class ObservationStore:
                 self.transform_version,
             )
             return self._cache
+
+    def materialize(self) -> ObservationBatch:
+        """Return a detached snapshot of the cached, concatenated observation state."""
+
+        view = self._materialize_view()
+        transformed = None if view.transformed_y is None else view.transformed_y.clone()
+        return ObservationBatch(
+            view.encoded.clone(),
+            view.y.clone(),
+            transformed,
+            view.observation_version,
+            view.transform_version,
+        )
 
     @property
     def encoded(self) -> EncodedBatch:
@@ -287,7 +334,7 @@ class ObservationStore:
         if not torch.isfinite(transformed).all():
             raise ValueError("transformed objective values must be finite")
         with self._lock:
-            self._transformed_y = transformed.detach()
+            self._transformed_y = transformed.detach().clone()
             self._transformed_observation_version = expected_version
             self.transform_version += 1
             self._cache = None

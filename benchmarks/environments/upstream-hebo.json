@@ -7,6 +7,8 @@
   "package_subdirectory": "HEBO",
   "import_name": "hebo",
   "python": "3.10",
+  "dependency_lock": "upstream-hebo.lock.txt",
+  "dependency_lock_sha256": "478120bf2cb593e94a0581264ce85f74424e424a69458139981e78614f8c69e2",
   "requirements_sha256": "55befc2ef7f79e61be22ca0dd7b95857334933e2f4e921153a4c088d4a2588cb",
   "setup_sha256": "219174e8d5c817b034cca36713dbfb329e064f5aafad6ef523d1fed899393814",
   "development_only": true

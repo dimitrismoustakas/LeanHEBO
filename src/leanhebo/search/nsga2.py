@@ -36,6 +36,8 @@ class NSGA2Result:
     ranks: Tensor
     crowding: Tensor
     generations: int
+    objective_calls: int
+    candidate_evaluations: int
 
     @property
     def pareto_mask(self) -> Tensor:
@@ -540,6 +542,8 @@ class TorchNSGA2:
         )
         objectives = self._evaluate(objective, population)
         completed_generations = 0
+        objective_calls = 1
+        candidate_evaluations = population.shape[0]
 
         for _ in range(self.generations):
             offspring = self._make_offspring(
@@ -556,6 +560,8 @@ class TorchNSGA2:
                 offspring,
                 expected_objectives=objectives.shape[1],
             )
+            objective_calls += 1
+            candidate_evaluations += offspring.shape[0]
             combined_population = torch.cat((population, offspring), dim=0)
             combined_objectives = torch.cat((objectives, offspring_objectives), dim=0)
             survival = elitist_survival(
@@ -578,4 +584,6 @@ class TorchNSGA2:
             ranks=ranks,
             crowding=crowding,
             generations=completed_generations,
+            objective_calls=objective_calls,
+            candidate_evaluations=candidate_evaluations,
         )

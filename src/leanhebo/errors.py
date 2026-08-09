@@ -17,3 +17,7 @@ class CheckpointError(LeanHEBOError):
 
 class SpaceMismatchError(LeanHEBOError, ValueError):
     """Raised when an encoded batch belongs to another compiled design space."""
+
+
+class SearchSpaceExhaustedError(LeanHEBOError):
+    """Raised when a requested unique candidate batch cannot be produced."""

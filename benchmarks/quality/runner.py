@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import importlib
+import json
 import math
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from benchmarks.harness.results import BenchmarkResult, PhaseRecorder
@@ -27,29 +30,58 @@ class RunSettings:
     generations: int = 2
     gp_initial_steps: int = 2
     gp_update_steps: int = 1
-    posterior_batch_size: int = 64
+    posterior_batch_size: int | None = 64
+    gp_optimizer: Literal["psgld", "adam", "lbfgs"] = "psgld"
+    learning_rate: float = 0.01
+    model_lifecycle: Literal["cold", "persistent"] = "persistent"
+    torch_threads: int = 1
     device: str = "cpu"
     dtype: Literal["float32", "float64"] = "float32"
 
     def __post_init__(self) -> None:
         for name in ("evaluation_budget", "batch_size", "random_samples", "population_size"):
             value = getattr(self, name)
-            if isinstance(value, bool) or value < 1:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be positive")
         for name in ("generations", "gp_initial_steps", "gp_update_steps"):
             value = getattr(self, name)
-            if isinstance(value, bool) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be non-negative")
-        if self.posterior_batch_size < 1:
-            raise ValueError("posterior_batch_size must be positive")
+        if self.random_samples < 2:
+            raise ValueError("random_samples must be at least two")
+        if self.posterior_batch_size is not None and (
+            isinstance(self.posterior_batch_size, bool)
+            or not isinstance(self.posterior_batch_size, int)
+            or self.posterior_batch_size < 1
+        ):
+            raise ValueError("posterior_batch_size must be positive or None")
+        if self.gp_optimizer not in ("psgld", "adam", "lbfgs"):
+            raise ValueError("unsupported GP optimizer")
+        if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
+            raise ValueError("learning_rate must be positive and finite")
+        if self.model_lifecycle not in ("cold", "persistent"):
+            raise ValueError("model_lifecycle must be cold or persistent")
+        if (
+            isinstance(self.torch_threads, bool)
+            or not isinstance(self.torch_threads, int)
+            or self.torch_threads < 1
+        ):
+            raise ValueError("torch_threads must be positive")
         if self.dtype not in ("float32", "float64"):
             raise ValueError("dtype must be float32 or float64")
+
+    @property
+    def effective_update_steps(self) -> int:
+        """Steps paid after the first fit under the selected lifecycle."""
+
+        return self.gp_initial_steps if self.model_lifecycle == "cold" else self.gp_update_steps
 
 
 @dataclass(frozen=True, slots=True)
 class Suggested:
     rows: list[dict[str, object]]
     native: object
+    search_report: Mapping[str, int] | None = None
 
 
 class OptimizerAdapter(Protocol):
@@ -76,7 +108,9 @@ class LeanHEBOAdapter:
         from leanhebo.config import GPConfig, LeanHEBOConfig, RuntimeConfig, SearchConfig
         from leanhebo.optimizer import LeanHEBO
 
+        torch.set_num_threads(settings.torch_threads)
         space = _lean_space(objective.parameters)
+        cold = settings.model_lifecycle == "cold"
         self._config = LeanHEBOConfig(
             random_samples=settings.random_samples,
             runtime=RuntimeConfig(
@@ -86,11 +120,15 @@ class LeanHEBOAdapter:
                 acquisition_batch_size=settings.posterior_batch_size,
             ),
             gp=GPConfig(
-                optimizer="adam",
+                optimizer=settings.gp_optimizer,
+                learning_rate=settings.learning_rate,
                 initial_steps=settings.gp_initial_steps,
-                update_steps=settings.gp_update_steps,
-                full_refit_interval=None,
+                update_steps=settings.effective_update_steps,
+                full_refit_interval=1 if cold else None,
                 full_refit_growth_factor=None,
+                reuse_parameters=not cold,
+                reuse_optimizer_state=not cold,
+                use_set_train_data=not cold,
             ),
             search=SearchConfig(
                 population_size=settings.population_size,
@@ -100,11 +138,11 @@ class LeanHEBOAdapter:
         )
         self._optimizer = LeanHEBO(space, config=self._config)
         self._torch = torch
+        self._search_reports: list[dict[str, int]] = []
         self._implementation = {
             "name": "leanhebo",
             "version": leanhebo.__version__,
-            "repository": None,
-            "commit": None,
+            **_local_revision(),
             "config": self._config.to_dict(),
         }
         self._work = WorkBudget(
@@ -113,10 +151,19 @@ class LeanHEBOAdapter:
             population_size=settings.population_size,
             generations=settings.generations,
             gp_initial_steps=settings.gp_initial_steps,
-            gp_update_steps=settings.gp_update_steps,
-            full_refit_interval=None,
+            gp_update_steps=settings.effective_update_steps,
+            full_refit_interval=1 if cold else None,
             posterior_batch_size=settings.posterior_batch_size,
             random_samples=settings.random_samples,
+            search_candidate_evaluations=(settings.population_size * (settings.generations + 1)),
+            gp_optimizer=settings.gp_optimizer,
+            learning_rate=settings.learning_rate,
+            reuse_parameters=not cold,
+            reuse_optimizer_state=not cold,
+            use_set_train_data=not cold,
+            device=settings.device,
+            dtype=settings.dtype,
+            torch_threads=settings.torch_threads,
         )
 
     @property
@@ -128,8 +175,18 @@ class LeanHEBOAdapter:
         return self._work
 
     def suggest(self, count: int) -> Suggested:
+        previous_search = self._optimizer.last_search
         candidates = self._optimizer.suggest(count)
-        return Suggested(candidates.to_records(), candidates)
+        search = self._optimizer.last_search
+        search_report: dict[str, int] | None = None
+        if search is not None and search is not previous_search:
+            search_report = {
+                "objective_calls": search.objective_calls,
+                "candidate_evaluations": search.candidate_evaluations,
+                "offspring_generations": search.generations,
+            }
+            self._search_reports.append(search_report)
+        return Suggested(candidates.to_records(), candidates, search_report)
 
     def observe(self, suggested: Suggested, values: Sequence[float]) -> None:
         outcomes = self._torch.tensor(values, dtype=self._optimizer.dtype)
@@ -158,6 +215,7 @@ class LeanHEBOAdapter:
                 for report in diagnostics.fit_reports
             ],
             "posterior_calls": None if surrogate is None else surrogate.posterior_calls,
+            "search_reports": list(self._search_reports),
         }
 
 
@@ -165,24 +223,38 @@ class UpstreamHEBOAdapter:
     """Adapter loaded only inside the isolated upstream development environment."""
 
     _COMMIT = "ee6112d39d1a9e9703fecaf9057193e1ec9dae72"
+    _POPULATION_SIZE = 100
+    _PYMOO_GENERATIONS = 100
+    _OFFSPRING_GENERATIONS = _PYMOO_GENERATIONS - 1
 
     def __init__(self, objective: ToyObjective, settings: RunSettings, seed: int) -> None:
         numpy = importlib.import_module("numpy")
         torch = importlib.import_module("torch")
+        acquisition_module = importlib.import_module("hebo.acquisitions.acq")
         design_module = importlib.import_module("hebo.design_space.design_space")
         optimizer_module = importlib.import_module("hebo.optimizers.hebo")
+        if settings.device != "cpu" or settings.dtype != "float32":
+            raise ValueError("the pinned upstream HEBO lane supports only CPU float32")
+        if settings.model_lifecycle != "cold":
+            raise ValueError("the pinned upstream HEBO implementation always uses a cold model")
+        torch.set_num_threads(settings.torch_threads)
         numpy.random.seed(seed)
         torch.manual_seed(seed)
         design_space = design_module.DesignSpace().parse(
             [parameter.to_upstream_spec() for parameter in objective.parameters]
         )
         model_config = {
-            "lr": 0.01,
+            "lr": settings.learning_rate,
+            "optimizer": settings.gp_optimizer,
             "num_epochs": settings.gp_initial_steps,
             "verbose": False,
             "noise_lb": 8e-4,
             "pred_likeli": False,
         }
+        self._active_search = {"objective_calls": 0, "candidate_evaluations": 0}
+        self._search_reports: list[dict[str, int]] = []
+        self._mace_class = acquisition_module.MACE
+
         self._optimizer = optimizer_module.HEBO(
             design_space,
             rand_sample=settings.random_samples,
@@ -198,7 +270,11 @@ class UpstreamHEBOAdapter:
             "config": {
                 "rand_sample": settings.random_samples,
                 "model_config": model_config,
-                "search": {"population_size": 100, "generations": 100},
+                "search": {
+                    "population_size": self._POPULATION_SIZE,
+                    "pymoo_generations": self._PYMOO_GENERATIONS,
+                    "offspring_generations": self._OFFSPRING_GENERATIONS,
+                },
             },
         }
         # The audited implementation reconstructs and fully fits the GP for every model-based
@@ -206,13 +282,24 @@ class UpstreamHEBOAdapter:
         self._work = WorkBudget(
             objective_evaluations=settings.evaluation_budget,
             batch_size=settings.batch_size,
-            population_size=100,
-            generations=100,
+            population_size=self._POPULATION_SIZE,
+            generations=self._OFFSPRING_GENERATIONS,
             gp_initial_steps=settings.gp_initial_steps,
             gp_update_steps=settings.gp_initial_steps,
             full_refit_interval=1,
             posterior_batch_size=None,
             random_samples=settings.random_samples,
+            search_candidate_evaluations=(
+                self._POPULATION_SIZE * (self._OFFSPRING_GENERATIONS + 1)
+            ),
+            gp_optimizer=settings.gp_optimizer,
+            learning_rate=settings.learning_rate,
+            reuse_parameters=False,
+            reuse_optimizer_state=False,
+            use_set_train_data=False,
+            device="cpu",
+            dtype="float32",
+            torch_threads=settings.torch_threads,
         )
 
     @property
@@ -224,9 +311,32 @@ class UpstreamHEBOAdapter:
         return self._work
 
     def suggest(self, count: int) -> Suggested:
-        candidates = self._optimizer.suggest(count)
+        model_based = int(self._optimizer.X.shape[0]) >= int(self._work.random_samples or 0)
+        self._active_search = {"objective_calls": 0, "candidate_evaluations": 0}
+        original_eval = self._mace_class.eval
+        adapter = self
+
+        def counted_eval(acquisition: object, x: object, xe: object) -> object:
+            rows = int(x.shape[0])  # type: ignore[attr-defined]
+            adapter._active_search["objective_calls"] += 1
+            adapter._active_search["candidate_evaluations"] += rows
+            return original_eval(acquisition, x, xe)
+
+        self._mace_class.eval = counted_eval
+        try:
+            candidates = self._optimizer.suggest(count)
+        finally:
+            self._mace_class.eval = original_eval
+        if model_based:
+            search_report = {
+                **self._active_search,
+                "offspring_generations": self._OFFSPRING_GENERATIONS,
+            }
+            self._search_reports.append(search_report)
+        else:
+            search_report = None
         rows = candidates.to_dict(orient="records")
-        return Suggested([dict(row) for row in rows], candidates)
+        return Suggested([dict(row) for row in rows], candidates, search_report)
 
     def observe(self, suggested: Suggested, values: Sequence[float]) -> None:
         outcomes = self._numpy.asarray(values, dtype=float).reshape(-1, 1)
@@ -236,7 +346,10 @@ class UpstreamHEBOAdapter:
         return {}
 
     def metrics(self) -> Mapping[str, object]:
-        return {"observations": int(self._optimizer.y.shape[0])}
+        return {
+            "observations": int(self._optimizer.y.shape[0]),
+            "search_reports": list(self._search_reports),
+        }
 
 
 def _lean_space(parameters: Sequence[ParameterDefinition]) -> Space:
@@ -253,6 +366,30 @@ def _lean_space(parameters: Sequence[ParameterDefinition]) -> Space:
             assert parameter.lower is not None and parameter.upper is not None
             converted.append(Float(parameter.name, float(parameter.lower), float(parameter.upper)))
     return Space(*converted)
+
+
+def _local_revision() -> dict[str, object]:
+    repository = Path(__file__).resolve().parents[2]
+    commit_process = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    commit = commit_process.stdout.strip()
+    if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
+        raise RuntimeError("could not resolve a full lowercase LeanHEBO Git commit")
+    status_process = subprocess.run(
+        ["git", "-C", str(repository), "status", "--porcelain", "--untracked-files=no"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "repository": str(repository),
+        "commit": commit,
+        "source_dirty": bool(status_process.stdout.strip()),
+    }
 
 
 def make_adapter(
@@ -276,6 +413,9 @@ def run_trial(adapter: OptimizerAdapter, objective: ToyObjective, seed: int) -> 
     best_so_far: list[float] = []
     failures: list[dict[str, object]] = []
     invalid_suggestions = 0
+    duplicate_suggestions = 0
+    seen_candidates: set[str] = set()
+    first_model_suggestion_seen = False
 
     while len(observed) < adapter.work.objective_evaluations:
         requested = min(
@@ -284,13 +424,36 @@ def run_trial(adapter: OptimizerAdapter, objective: ToyObjective, seed: int) -> 
         )
         stage = "suggest"
         try:
-            with recorder.phase("driver.suggest"):
+            if len(observed) < int(adapter.work.random_samples or 0):
+                suggest_phase = "driver.suggest.initial_sobol"
+            elif not first_model_suggestion_seen:
+                suggest_phase = "driver.suggest.first_model"
+                first_model_suggestion_seen = True
+            else:
+                suggest_phase = "driver.suggest.steady_model"
+            with recorder.phase(suggest_phase):
                 suggested = adapter.suggest(requested)
             if len(suggested.rows) != requested:
                 invalid_suggestions += abs(requested - len(suggested.rows))
                 raise RuntimeError(
                     f"optimizer returned {len(suggested.rows)} candidates; expected {requested}"
                 )
+            stage = "search-work"
+            _validate_search_work(
+                suggested.search_report,
+                adapter.work,
+                model_based=suggest_phase != "driver.suggest.initial_sobol",
+            )
+            for row in suggested.rows:
+                key = json.dumps(
+                    [row[parameter.name] for parameter in objective.parameters],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                if key in seen_candidates:
+                    duplicate_suggestions += 1
+                else:
+                    seen_candidates.add(key)
             stage = "objective"
             with recorder.phase("driver.objective"):
                 values = objective.evaluate(suggested.rows)
@@ -315,6 +478,7 @@ def run_trial(adapter: OptimizerAdapter, objective: ToyObjective, seed: int) -> 
     metrics: dict[str, object] = {
         "evaluations_completed": len(observed),
         "invalid_suggestions": invalid_suggestions,
+        "duplicate_suggestions": duplicate_suggestions,
         "failed": bool(failures),
         "implementation_metrics": adapter.metrics(),
     }
@@ -338,3 +502,34 @@ def run_trial(adapter: OptimizerAdapter, objective: ToyObjective, seed: int) -> 
         quality=quality,
         failures=failures,
     )
+
+
+def _validate_search_work(
+    report: Mapping[str, int] | None,
+    work: WorkBudget,
+    *,
+    model_based: bool,
+) -> None:
+    declared_candidates = work.search_candidate_evaluations
+    if not model_based:
+        if report is not None:
+            raise RuntimeError("initial Sobol suggestion unexpectedly reported acquisition search")
+        return
+    if declared_candidates is None:
+        return
+    if report is None:
+        raise RuntimeError("model-based suggestion did not report actual search work")
+    actual_candidates = report.get("candidate_evaluations")
+    if actual_candidates != declared_candidates:
+        raise RuntimeError(
+            "search candidate work differed from its declaration: "
+            f"actual={actual_candidates}, declared={declared_candidates}"
+        )
+    if work.generations is not None:
+        expected_calls = work.generations + 1
+        actual_calls = report.get("objective_calls")
+        if actual_calls != expected_calls:
+            raise RuntimeError(
+                "search objective-call work differed from its declaration: "
+                f"actual={actual_calls}, declared={expected_calls}"
+            )

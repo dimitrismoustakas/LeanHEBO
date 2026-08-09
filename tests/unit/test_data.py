@@ -19,7 +19,7 @@ def test_observe_candidate_uses_direct_encoded_path(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(CompiledSpace, "encode", fail_encode)
     assert store.observe(candidates, torch.arange(4.0)) == 4
-    assert store.encoded_chunks[0].continuous.data_ptr() == candidates.continuous.data_ptr()
+    assert store.encoded_chunks[0].continuous.data_ptr() != candidates.continuous.data_ptr()
     assert store.contains(candidates).all()
 
 
@@ -31,11 +31,36 @@ def test_chunks_materialize_once_and_invalidate_on_append() -> None:
 
     assert store.chunk_count == 2
     first = store.materialize()
-    assert first is store.materialize()
+    second = store.materialize()
+    assert first is not second
+    assert torch.equal(first.continuous, second.continuous)
+    assert first.continuous.data_ptr() != second.continuous.data_ptr()
     assert len(first) == 5
     store.append(compiled.sample(1, seed=3), [6.0])
-    assert store.materialize() is not first
+    assert len(store.materialize()) == 6
     assert len(store) == 6
+
+
+def test_public_snapshots_cannot_mutate_append_only_history() -> None:
+    compiled = Space(Integer("x", 0, 5), Bool("b")).compile()
+    candidates = compiled.sample(3, seed=11)
+    store = ObservationStore(compiled)
+    store.append(candidates, [1.0, 2.0, 3.0])
+    expected = store.materialize()
+
+    chunks = store.encoded_chunks
+    outcomes = store.y_chunks
+    materialized = store.materialize()
+    chunks[0].categorical.zero_()
+    outcomes[0].fill_(99)
+    materialized.continuous.zero_()
+    materialized.y.fill_(99)
+
+    actual = store.materialize()
+    assert torch.equal(actual.continuous, expected.continuous)
+    assert torch.equal(actual.categorical, expected.categorical)
+    assert torch.equal(actual.y, expected.y)
+    assert store.contains(candidates).all()
 
 
 def test_nonfinite_policy_and_output_shape_validation() -> None:

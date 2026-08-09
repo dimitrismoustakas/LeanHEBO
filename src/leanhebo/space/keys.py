@@ -59,6 +59,29 @@ class CanonicalKeySet:
     def clear(self) -> None:
         self._keys.clear()
 
+    def snapshot(self) -> tuple[CanonicalKey, ...]:
+        """Return a stable primitive snapshot suitable for checkpointing."""
+
+        return tuple(sorted(self._keys))
+
+    def add_canonical(self, keys: object) -> int:
+        """Restore validated canonical keys without reconstructing candidate tensors."""
+
+        if not isinstance(keys, (list, tuple)):
+            raise TypeError("canonical key state must be a sequence")
+        validated: set[CanonicalKey] = set()
+        for key in keys:
+            if not isinstance(key, (list, tuple)) or len(key) != len(self.space):
+                raise ValueError("canonical key has an incompatible design-space width")
+            if any(
+                isinstance(component, bool) or not isinstance(component, int) for component in key
+            ):
+                raise TypeError("canonical key components must be integers")
+            validated.add(tuple(key))
+        previous = len(self._keys)
+        self._keys.update(validated)
+        return len(self._keys) - previous
+
     def _encoded(self, value: EncodedBatch | CandidateBatch) -> EncodedBatch:
         if isinstance(value, CandidateBatch):
             self.space._validate_fingerprint(value.space_fingerprint)

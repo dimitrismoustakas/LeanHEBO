@@ -2,6 +2,7 @@
 # Portions derived from Huawei HEBO; see NOTICE.md.
 
 import torch
+from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 
 from leanhebo.search import (
     crowding_distance,
@@ -72,3 +73,16 @@ def test_empty_objective_matrix_has_empty_ranks_and_crowding() -> None:
 
     assert non_dominated_sort(objectives).shape == (0,)
     assert crowding_distance(objectives).shape == (0,)
+
+
+def test_non_dominated_ranks_match_pymoo_reference() -> None:
+    generator = torch.Generator().manual_seed(37)
+    objectives = torch.rand((40, 3), generator=generator)
+    objectives[5] = objectives[4]
+
+    pymoo_fronts = NonDominatedSorting().do(objectives.numpy())
+    expected = torch.empty(40, dtype=torch.long)
+    for rank, front in enumerate(pymoo_fronts):
+        expected[torch.as_tensor(front, dtype=torch.long)] = rank
+
+    assert torch.equal(non_dominated_sort(objectives), expected)

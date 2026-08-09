@@ -19,6 +19,7 @@ WORK = WorkBudget(
     batch_size=1,
     population_size=POPULATION,
     generations=GENERATIONS,
+    search_candidate_evaluations=POPULATION * (GENERATIONS + 1),
 )
 
 
@@ -41,7 +42,7 @@ class _ObjectiveCounter:
         )
 
 
-def _run_search() -> tuple[int, int]:
+def _run_search() -> tuple[int, int, int, int]:
     counter = _ObjectiveCounter()
     optimizer = TorchNSGA2(
         population_size=POPULATION,
@@ -55,10 +56,19 @@ def _run_search() -> tuple[int, int]:
         generator=torch.Generator().manual_seed(17),
     )
     assert result.generations == GENERATIONS
-    return counter.calls, counter.candidates
+    return (
+        counter.calls,
+        counter.candidates,
+        result.objective_calls,
+        result.candidate_evaluations,
+    )
 
 
 def test_torch_nsga2_fixed_candidate_work(benchmark: object) -> None:
-    calls, candidates = benchmark(_run_search)  # type: ignore[operator]
+    calls, candidates, reported_calls, reported_candidates = benchmark(  # type: ignore[operator]
+        _run_search
+    )
     assert calls == GENERATIONS + 1
     assert candidates == WORK.expected_search_evaluations
+    assert reported_calls == calls
+    assert reported_candidates == candidates

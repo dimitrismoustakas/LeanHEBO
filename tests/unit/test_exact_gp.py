@@ -28,8 +28,6 @@ def _surrogate(*, categories: tuple[int, ...] = ()) -> ExactGPSurrogate:
         ),
         runtime=RuntimeConfig(seed=4),
         generator=make_generator("cpu", 4),
-        input_lower=torch.tensor([0.0]),
-        input_upper=torch.tensor([1.0]),
     )
 
 
@@ -57,6 +55,73 @@ def test_persistent_update_reuses_model_and_changes_train_data() -> None:
     assert gp.update_count == 1
     assert gp.model is not None
     assert gp.model.train_targets.shape == (7,)
+
+
+def test_input_scaler_fits_the_observed_range_instead_of_design_bounds() -> None:
+    gp = _surrogate()
+    continuous = torch.tensor([[40.0], [50.0], [60.0]])
+    categorical = torch.empty((3, 0), dtype=torch.long)
+    targets = torch.tensor([1.0, 0.0, 1.0])
+
+    gp.fit(continuous, categorical, targets, transform_version=1)
+
+    torch.testing.assert_close(
+        gp.train_continuous,
+        torch.tensor([[-1.0], [0.0], [1.0]]),
+    )
+    torch.testing.assert_close(gp.input_scaler.data_min_, torch.tensor([40.0]))  # type: ignore[union-attr]
+    torch.testing.assert_close(gp.input_scaler.data_max_, torch.tensor([60.0]))  # type: ignore[union-attr]
+    assert gp.input_scaler_version == 1
+
+
+def test_observed_range_scaler_and_predictions_survive_state_round_trip() -> None:
+    gp = _surrogate()
+    continuous = torch.tensor([[40.0], [50.0], [60.0], [65.0]])
+    categorical = torch.empty((4, 0), dtype=torch.long)
+    targets = torch.tensor([1.0, 0.0, 1.0, 2.25])
+    query = torch.tensor([[45.0], [70.0]])
+    query_categories = torch.empty((2, 0), dtype=torch.long)
+    gp.fit(continuous, categorical, targets, transform_version=3)
+    expected = gp.predict(query, query_categories)
+
+    restored = _surrogate()
+    restored.load_state_dict(gp.state_dict())
+    actual = restored.predict(query, query_categories)
+
+    assert restored.input_scaler_version == gp.input_scaler_version
+    torch.testing.assert_close(restored.input_scaler.data_min_, torch.tensor([40.0]))  # type: ignore[union-attr]
+    torch.testing.assert_close(restored.input_scaler.data_max_, torch.tensor([65.0]))  # type: ignore[union-attr]
+    for actual_value, expected_value in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_value, expected_value)
+
+
+def test_categorical_only_gp_uses_checkpointed_identity_input_scaler() -> None:
+    gp = ExactGPSurrogate(
+        num_continuous=0,
+        category_sizes=(2,),
+        config=GPConfig(optimizer="adam", initial_steps=1, update_steps=1),
+        runtime=RuntimeConfig(seed=6),
+        generator=make_generator("cpu", 6),
+    )
+    continuous = torch.empty((4, 0))
+    categorical = torch.tensor([[0], [1], [0], [1]])
+    targets = torch.tensor([0.0, 1.0, 0.1, 0.9])
+    gp.fit(continuous, categorical, targets, transform_version=1)
+    expected = gp.predict(continuous[:2], categorical[:2])
+
+    restored = ExactGPSurrogate(
+        num_continuous=0,
+        category_sizes=(2,),
+        config=gp.config,
+        runtime=gp.runtime,
+        generator=make_generator("cpu", 7),
+    )
+    restored.load_state_dict(gp.state_dict())
+    actual = restored.predict(continuous[:2], categorical[:2])
+
+    assert restored.input_scaler_version == 1
+    for actual_value, expected_value in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_value, expected_value)
 
 
 def test_mixed_gp_posterior_and_state_round_trip() -> None:

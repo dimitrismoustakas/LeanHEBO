@@ -19,6 +19,15 @@ def _comma_separated(value: str) -> list[str]:
     return items
 
 
+def _optional_positive_int(value: str) -> int | None:
+    if value.lower() in {"none", "null", "unbatched"}:
+        return None
+    converted = int(value)
+    if converted < 1:
+        raise argparse.ArgumentTypeError("expected a positive integer or 'none'")
+    return converted
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -40,7 +49,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--generations", type=int, default=2)
     parser.add_argument("--gp-initial-steps", type=int, default=2)
     parser.add_argument("--gp-update-steps", type=int, default=1)
-    parser.add_argument("--posterior-batch-size", type=int, default=64)
+    parser.add_argument("--posterior-batch-size", type=_optional_positive_int, default=64)
+    parser.add_argument(
+        "--gp-optimizer",
+        choices=("psgld", "adam", "lbfgs"),
+        default="psgld",
+    )
+    parser.add_argument("--learning-rate", type=float, default=0.01)
+    parser.add_argument(
+        "--model-lifecycle",
+        choices=("cold", "persistent"),
+        default="persistent",
+        help="upstream-hebo requires cold; persistent is LeanHEBO's reuse lane",
+    )
+    parser.add_argument("--torch-threads", type=int, default=1)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument(
@@ -62,6 +84,10 @@ def main() -> int:
         gp_initial_steps=args.gp_initial_steps,
         gp_update_steps=args.gp_update_steps,
         posterior_batch_size=args.posterior_batch_size,
+        gp_optimizer=args.gp_optimizer,
+        learning_rate=args.learning_rate,
+        model_lifecycle=args.model_lifecycle,
+        torch_threads=args.torch_threads,
         device=args.device,
         dtype=args.dtype,
     )

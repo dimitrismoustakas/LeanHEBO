@@ -31,6 +31,10 @@ def test_configuration_round_trip() -> None:
         (lambda: GPConfig(full_refit_growth_factor=1.0), "growth_factor"),
         (lambda: GPConfig(use_fantasy_updates=True), "not implemented"),
         (lambda: GPConfig(learning_rate=float("nan")), "learning_rate"),
+        (
+            lambda: GPConfig(noise_lower_bound=0.01, noise_initial=0.01),
+            "noise_initial.*strictly greater",
+        ),
         (lambda: RuntimeConfig(dtype="float16"), "dtype"),  # type: ignore[arg-type]
         (lambda: WarpConfig(lambda_lower_bound=float("nan")), "lambda bounds"),
         (lambda: AcquisitionConfig(kappa=float("nan")), "kappa"),

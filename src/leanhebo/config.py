@@ -84,6 +84,8 @@ class GPConfig:
             or self.noise_initial <= 0
         ):
             raise ValueError("noise bounds and initial value must be positive and finite")
+        if self.noise_initial <= self.noise_lower_bound:
+            raise ValueError("noise_initial must be strictly greater than noise_lower_bound")
         if self.use_fantasy_updates:
             raise ValueError(
                 "use_fantasy_updates=True is not implemented; use the persistent "

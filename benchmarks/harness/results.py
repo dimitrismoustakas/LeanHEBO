@@ -15,7 +15,8 @@ from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TypeAlias
 
@@ -24,7 +25,7 @@ from benchmarks.harness.work import Scalar, WorkBudget
 JsonValue: TypeAlias = Scalar | list["JsonValue"] | dict[str, "JsonValue"]
 PhaseData: TypeAlias = dict[str, dict[str, list[float]]]
 
-RESULT_SCHEMA_VERSION = 1
+RESULT_SCHEMA_VERSION = 2
 
 
 def _json_value(value: object, *, path: str = "value") -> JsonValue:
@@ -106,6 +107,19 @@ def collect_runtime_metadata() -> dict[str, JsonValue]:
                 "NUMEXPR_NUM_THREADS",
             )
         },
+        "packages": {
+            distribution: _distribution_version(distribution)
+            for distribution in (
+                "torch",
+                "gpytorch",
+                "numpy",
+                "pandas",
+                "pymoo",
+                "GPy",
+                "HEBO",
+                "leanhebo",
+            )
+        },
     }
     try:
         import torch
@@ -130,6 +144,13 @@ def collect_runtime_metadata() -> dict[str, JsonValue]:
     return metadata
 
 
+def _distribution_version(distribution: str) -> str | None:
+    try:
+        return importlib_metadata.version(distribution)
+    except importlib_metadata.PackageNotFoundError:
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class BenchmarkResult:
     """One raw timing or quality result conforming to ``result.schema.json``."""
@@ -145,7 +166,10 @@ class BenchmarkResult:
     failures: Sequence[Mapping[str, object]] = ()
     runtime: Mapping[str, object] = field(default_factory=collect_runtime_metadata)
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    created_at_utc: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    created_at_utc: str = field(
+        # datetime.UTC is unavailable in the pinned baseline's Python 3.10 runtime.
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    )
 
     def __post_init__(self) -> None:
         for name, value in (("suite", self.suite), ("case", self.case), ("run_id", self.run_id)):

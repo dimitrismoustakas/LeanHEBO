@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from leanhebo import LeanHEBO
 from leanhebo.checkpoint import load_checkpoint, save_checkpoint
 from leanhebo.errors import CheckpointError
 
@@ -27,3 +28,11 @@ def test_corrupt_checkpoint_always_raises_typed_error(tmp_path: Path, contents: 
 
     with pytest.raises(CheckpointError, match="failed to load"):
         load_checkpoint(path)
+
+
+def test_safe_but_malformed_optimizer_payload_raises_typed_error(tmp_path: Path) -> None:
+    path = tmp_path / "malformed.leanhebo"
+    save_checkpoint(path, {"config": {}})
+
+    with pytest.raises(CheckpointError, match="payload is malformed"):
+        LeanHEBO.load(path, map_location="cpu")

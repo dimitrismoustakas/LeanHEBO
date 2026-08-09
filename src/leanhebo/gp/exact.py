@@ -23,6 +23,9 @@ from leanhebo.gp.kernel import (
     initialize_numeric_lengthscales,
 )
 from leanhebo.gp.optimizer import PreconditionedSGLD, create_optimizer
+from leanhebo.transforms import IdentityScaler, TorchMinMaxScaler
+
+_STATE_SCHEMA_VERSION = 2
 
 
 class _MixedExactGP(gpytorch.models.ExactGP):  # type: ignore[misc]
@@ -66,8 +69,6 @@ class ExactGPSurrogate:
         runtime: RuntimeConfig,
         generator: torch.Generator,
         diagnostics: Diagnostics | None = None,
-        input_lower: torch.Tensor | None = None,
-        input_upper: torch.Tensor | None = None,
     ) -> None:
         if num_continuous < 0:
             raise ValueError("num_continuous cannot be negative")
@@ -81,10 +82,12 @@ class ExactGPSurrogate:
         self.dtype = getattr(torch, runtime.dtype)
         self.generator = generator
         self.diagnostics = diagnostics
-        self.input_lower = self._bound(input_lower, default=0.0)
-        self.input_upper = self._bound(input_upper, default=1.0)
-        if torch.any(self.input_upper < self.input_lower):
-            raise ValueError("continuous upper bounds cannot be below lower bounds")
+        self.input_scaler: IdentityScaler | TorchMinMaxScaler
+        if self.num_continuous:
+            self.input_scaler = TorchMinMaxScaler(feature_range=(-1.0, 1.0))
+        else:
+            self.input_scaler = IdentityScaler()
+        self.input_scaler.to(device=self.device, dtype=self.dtype)
         self.model: _MixedExactGP | None = None
         self.likelihood: gpytorch.likelihoods.GaussianLikelihood | None = None
         self.optimizer: torch.optim.Optimizer | None = None
@@ -112,15 +115,13 @@ class ExactGPSurrogate:
         noise: torch.Tensor = self.likelihood.noise.detach().reshape(())
         return noise
 
-    def _bound(self, value: torch.Tensor | None, *, default: float) -> torch.Tensor:
-        if value is None:
-            return torch.full((self.num_continuous,), default, device=self.device, dtype=self.dtype)
-        tensor = torch.as_tensor(value, device=self.device, dtype=self.dtype).reshape(-1)
-        if tensor.numel() != self.num_continuous:
-            raise ValueError("continuous bound has the wrong size")
-        return tensor
+    @property
+    def input_scaler_version(self) -> int:
+        """Version of the observed-data input scaling used by the active GP."""
 
-    def _prepare_inputs(
+        return self.input_scaler.version
+
+    def _coerce_inputs(
         self, continuous: torch.Tensor, categorical: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         continuous = torch.as_tensor(continuous, device=self.device, dtype=self.dtype)
@@ -131,15 +132,20 @@ class ExactGPSurrogate:
             raise ValueError("categorical input shape is incompatible with the surrogate")
         if continuous.shape[0] != categorical.shape[0]:
             raise ValueError("continuous and categorical batch lengths differ")
-        if continuous.numel():
-            span = self.input_upper - self.input_lower
-            safe_span = torch.where(span > 0, span, torch.ones_like(span))
-            continuous = 2.0 * (continuous - self.input_lower) / safe_span - 1.0
-            continuous[:, span == 0] = 0.0
+        if not torch.isfinite(continuous).all():
+            raise ValueError("continuous GP inputs must all be finite")
         for index, size in enumerate(self.category_sizes):
             if torch.any((categorical[:, index] < 0) | (categorical[:, index] >= size)):
                 raise ValueError(f"categorical codes in dimension {index} are out of bounds")
         return continuous.contiguous(), categorical.contiguous()
+
+    def _prepare_prediction_inputs(
+        self, continuous: torch.Tensor, categorical: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        continuous, categorical = self._coerce_inputs(continuous, categorical)
+        if self.num_continuous and not self.input_scaler.fitted:
+            raise RuntimeError("the GP input scaler has not been fitted")
+        return self.input_scaler.transform(continuous).contiguous(), categorical
 
     def fit(
         self,
@@ -149,10 +155,11 @@ class ExactGPSurrogate:
         *,
         transform_version: int,
         force_full_refit: bool = False,
+        reset_parameters: bool = False,
     ) -> FitReport:
         """Cold-fit, warm-update, or scheduled-refit the exact GP."""
 
-        continuous, categorical = self._prepare_inputs(continuous, categorical)
+        continuous, categorical = self._coerce_inputs(continuous, categorical)
         targets = torch.as_tensor(targets, device=self.device, dtype=self.dtype).reshape(-1)
         if targets.shape[0] != continuous.shape[0]:
             raise ValueError("target and input batch lengths differ")
@@ -161,8 +168,17 @@ class ExactGPSurrogate:
         if targets.numel() < 2:
             raise ValueError("at least two observations are required to fit an exact GP")
 
+        previous_input_scaler_version = self.input_scaler_version
+        self.input_scaler.fit(continuous)
+        continuous = self.input_scaler.transform(continuous).contiguous()
+
         first_fit = self.model is None
-        full_refit = first_fit or force_full_refit or self._full_refit_due(targets.numel())
+        full_refit = (
+            first_fit
+            or force_full_refit
+            or reset_parameters
+            or self._full_refit_due(targets.numel())
+        )
         kind = "initial" if first_fit else ("full_refit" if full_refit else "update")
         steps = self.config.initial_steps if full_refit else self.config.update_steps
         previous_model_state = self.model.state_dict() if self.model is not None else None
@@ -182,19 +198,21 @@ class ExactGPSurrogate:
         if full_refit or not self.config.use_set_train_data or not self.config.reuse_parameters:
             self._construct_model(
                 retain_model_state=(
-                    previous_model_state if self.config.reuse_parameters and not first_fit else None
+                    previous_model_state
+                    if self.config.reuse_parameters and not first_fit and not reset_parameters
+                    else None
                 ),
                 retain_likelihood_state=(
                     previous_likelihood_state
-                    if self.config.reuse_parameters and not first_fit
+                    if self.config.reuse_parameters and not first_fit and not reset_parameters
                     else None
                 ),
                 retain_optimizer_state=(
                     previous_optimizer_state
-                    if self.config.reuse_optimizer_state and not first_fit
+                    if self.config.reuse_optimizer_state and not first_fit and not reset_parameters
                     else None
                 ),
-                initialize_kernel=first_fit or not self.config.reuse_parameters,
+                initialize_kernel=first_fit or reset_parameters or not self.config.reuse_parameters,
             )
         else:
             assert self.model is not None
@@ -207,6 +225,8 @@ class ExactGPSurrogate:
                 self.optimizer.set_observation_count(targets.numel())
 
         self.posterior_cache_version += 1
+        if previous_input_scaler_version and self.diagnostics is not None:
+            self.diagnostics.increment("gp.input_transform_invalidations")
         if transform_changed and self.diagnostics is not None:
             self.diagnostics.increment("gp.transform_invalidations")
         report = self._optimize(kind, steps)
@@ -464,7 +484,7 @@ class ExactGPSurrogate:
 
         if self.model is None or self.likelihood is None:
             raise RuntimeError("the GP has not been fitted")
-        continuous, categorical = self._prepare_inputs(continuous, categorical)
+        continuous, categorical = self._prepare_prediction_inputs(continuous, categorical)
         self.model.eval()
         self.likelihood.eval()
         self.posterior_calls += 1
@@ -503,7 +523,11 @@ class ExactGPSurrogate:
 
     def state_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": _STATE_SCHEMA_VERSION,
+            "input_scaler_kind": (
+                "minmax" if isinstance(self.input_scaler, TorchMinMaxScaler) else "identity"
+            ),
+            "input_scaler": self.input_scaler.state_dict(),
             "model": None if self.model is None else self.model.state_dict(),
             "likelihood": (None if self.likelihood is None else self.likelihood.state_dict()),
             "optimizer": None if self.optimizer is None else self.optimizer.state_dict(),
@@ -522,8 +546,16 @@ class ExactGPSurrogate:
         }
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
-        if int(state.get("schema_version", -1)) != 1:
+        if int(state.get("schema_version", -1)) != _STATE_SCHEMA_VERSION:
             raise ValueError("unsupported exact-GP state schema")
+        expected_scaler_kind = "minmax" if self.num_continuous else "identity"
+        if state.get("input_scaler_kind") != expected_scaler_kind:
+            raise ValueError("exact-GP input scaler is incompatible with the model dimensions")
+        scaler_state = state.get("input_scaler")
+        if not isinstance(scaler_state, Mapping):
+            raise ValueError("exact-GP input scaler state is missing or malformed")
+        self.input_scaler.load_state_dict(dict(scaler_state))
+        self.input_scaler.to(device=self.device, dtype=self.dtype)
         train_continuous = state.get("train_continuous")
         train_categorical = state.get("train_categorical")
         train_targets = state.get("train_targets")

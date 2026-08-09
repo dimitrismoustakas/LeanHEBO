@@ -20,6 +20,8 @@ from leanhebo.config import (
     WarpConfig,
 )
 from leanhebo.data import CandidateBatch, EncodedBatch
+from leanhebo.errors import NumericalError, SearchSpaceExhaustedError
+from leanhebo.gp import ExactGPSurrogate, FitReport
 from leanhebo.space import Bool, Categorical, CompiledSpace, Float, Integer, Space
 
 
@@ -76,15 +78,40 @@ def test_optimizer_observes_its_candidate_batch_without_reencoding(
 ) -> None:
     optimizer = LeanHEBO(_space(), config=_config(dtype="float64"))
     candidates = optimizer.suggest(3)
+    outcomes = _outcomes(candidates)
+    expected_continuous = candidates.continuous.clone()
+    expected_categorical = candidates.categorical.clone()
+    expected_outcomes = outcomes.clone()
 
     def fail_encode(self: CompiledSpace, value: object) -> EncodedBatch:
         raise AssertionError(f"unexpected re-encoding of {type(value).__name__}")
 
     monkeypatch.setattr(CompiledSpace, "encode", fail_encode)
-    assert optimizer.observe(candidates, _outcomes(candidates)) == len(candidates)
+    assert optimizer.observe(candidates, outcomes) == len(candidates)
     stored = optimizer.store.encoded_chunks[0]
-    assert stored.continuous.data_ptr() == candidates.continuous.data_ptr()
-    assert stored.categorical.data_ptr() == candidates.categorical.data_ptr()
+    assert stored.continuous.data_ptr() != candidates.continuous.data_ptr()
+    assert stored.categorical.data_ptr() != candidates.categorical.data_ptr()
+
+    candidates.continuous.add_(10)
+    candidates.categorical.zero_()
+    outcomes.add_(10)
+
+    assert torch.equal(stored.continuous, expected_continuous)
+    assert torch.equal(stored.categorical, expected_categorical)
+    assert torch.equal(optimizer.store.y_chunks[0], expected_outcomes)
+    assert optimizer.store.contains(EncodedBatch(expected_continuous, expected_categorical)).all()
+
+
+def test_finite_space_exhaustion_never_returns_duplicate_candidates() -> None:
+    optimizer = LeanHEBO(
+        Space(Bool("flag")),
+        config=LeanHEBOConfig(runtime=RuntimeConfig(seed=1)),
+    )
+
+    with pytest.raises(SearchSpaceExhaustedError, match=r"3 unique.*only 2 unseen"):
+        optimizer.suggest(3)
+
+    assert optimizer.diagnostics.counters["suggest.uniqueness_exhausted"] == 1
 
 
 def test_integrated_mace_evaluates_each_candidate_chunk_once(
@@ -123,6 +150,110 @@ def test_integrated_mace_evaluates_each_candidate_chunk_once(
         assert posterior_calls == math.ceil(candidate_count / 3)
     assert optimizer.surrogate.posterior_calls == sum(calls for _, calls in events)
     assert optimizer.diagnostics.counters["posterior.calls"] == sum(calls for _, calls in events)
+
+
+def test_posterior_numerical_failure_gets_one_hard_refit_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    optimizer = LeanHEBO(_space(), config=_config(generations=0))
+    initial = optimizer.suggest(3)
+    optimizer.observe(initial, _outcomes(initial))
+    original_predict = ExactGPSurrogate.predict
+    calls = 0
+
+    def fail_once(
+        surrogate: ExactGPSurrogate,
+        continuous: torch.Tensor,
+        categorical: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise NumericalError("synthetic posterior failure")
+        return original_predict(surrogate, continuous, categorical)
+
+    monkeypatch.setattr(ExactGPSurrogate, "predict", fail_once)
+    candidates = optimizer.suggest(1)
+
+    assert len(candidates) == 1
+    assert optimizer.surrogate is not None
+    assert optimizer.surrogate.full_refit_count == 2
+    assert optimizer.diagnostics.counters["gp.numerical_recovery_attempts"] == 1
+    assert optimizer.diagnostics.counters["gp.numerical_recovery_failures"] == 0
+
+
+def test_repeated_posterior_numerical_failure_raises_after_one_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    optimizer = LeanHEBO(_space(), config=_config(generations=0))
+    initial = optimizer.suggest(3)
+    optimizer.observe(initial, _outcomes(initial))
+    calls = 0
+
+    def always_fail(
+        surrogate: ExactGPSurrogate,
+        continuous: torch.Tensor,
+        categorical: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        del surrogate, continuous, categorical
+        nonlocal calls
+        calls += 1
+        raise NumericalError("persistent posterior failure")
+
+    monkeypatch.setattr(ExactGPSurrogate, "predict", always_fail)
+    with pytest.raises(NumericalError, match="persistent posterior failure"):
+        optimizer.suggest(1)
+
+    assert calls == 2
+    assert optimizer.diagnostics.counters["gp.numerical_recovery_attempts"] == 1
+    assert optimizer.diagnostics.counters["gp.numerical_recovery_failures"] == 1
+
+
+def test_warm_fit_numerical_failure_gets_one_hard_refit_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    optimizer = LeanHEBO(_space(), config=_config(generations=0))
+    initial = optimizer.suggest(3)
+    optimizer.observe(initial, _outcomes(initial))
+    appended = optimizer.suggest(1)
+    optimizer.observe(appended, _outcomes(appended))
+    original_fit = ExactGPSurrogate.fit
+    calls = 0
+
+    def fail_once(
+        surrogate: ExactGPSurrogate,
+        continuous: torch.Tensor,
+        categorical: torch.Tensor,
+        targets: torch.Tensor,
+        *,
+        transform_version: int,
+        force_full_refit: bool = False,
+        reset_parameters: bool = False,
+    ) -> FitReport:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise NumericalError("synthetic warm-fit failure")
+        assert reset_parameters
+        return original_fit(
+            surrogate,
+            continuous,
+            categorical,
+            targets,
+            transform_version=transform_version,
+            force_full_refit=force_full_refit,
+            reset_parameters=reset_parameters,
+        )
+
+    monkeypatch.setattr(ExactGPSurrogate, "fit", fail_once)
+    candidates = optimizer.suggest(1)
+
+    assert len(candidates) == 1
+    assert calls == 2
+    assert optimizer.surrogate is not None
+    assert optimizer.surrogate.full_refit_count == 2
+    assert optimizer.diagnostics.counters["gp.numerical_recovery_attempts"] == 1
+    assert optimizer.diagnostics.counters["gp.numerical_recovery_failures"] == 0
 
 
 @pytest.mark.parametrize(

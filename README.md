@@ -41,9 +41,9 @@ for _ in range(30):
     optimizer.observe(candidates, values)
 ```
 
-Passing the original `CandidateBatch` to `observe` reuses its encoded tensors. Records,
-NumPy arrays, Pandas DataFrames, and Polars DataFrames are also accepted at the boundary and
-encoded once.
+Passing the original `CandidateBatch` to `observe` avoids re-encoding; the observation store takes
+one owned tensor snapshot so later caller mutation cannot rewrite history. Records, NumPy arrays,
+Pandas DataFrames, and Polars DataFrames are also accepted at the boundary and encoded once.
 
 Contextual values are fixed without a DataFrame round trip:
 

@@ -42,6 +42,8 @@ def test_minimize_is_reproducible_from_a_torch_generator() -> None:
     assert first.population.shape == (24, 2)
     assert first.objectives.shape == (24, 2)
     assert first.generations == 8
+    assert first.objective_calls == 9
+    assert first.candidate_evaluations == 24 * 9
     assert first.pareto_population.shape[0] > 1
 
 
@@ -91,6 +93,8 @@ def test_minimize_injects_incumbents_before_sobol_points() -> None:
 
     assert torch.equal(result.population[0], incumbent)
     assert result.generations == 0
+    assert result.objective_calls == 1
+    assert result.candidate_evaluations == 8
 
 
 def test_mixed_variable_minimize_preserves_steps_categories_and_context() -> None:
@@ -141,6 +145,7 @@ def test_saturated_discrete_space_returns_all_available_unique_points() -> None:
 
     assert result.population.shape == (2, 1)
     assert torch.equal(torch.sort(result.population[:, 0]).values, torch.tensor([0.0, 1.0]))
+    assert result.candidate_evaluations >= result.population.shape[0]
 
 
 def test_objective_shape_and_finite_values_are_checked() -> None:
