@@ -51,6 +51,23 @@ def test_crowding_ignores_constant_objective_ranges() -> None:
     assert distance[1].item() == 1.0
 
 
+def test_ranked_crowding_matches_independent_front_calculation() -> None:
+    generator = torch.Generator().manual_seed(19)
+    objectives = torch.rand((80, 4), generator=generator)
+    objectives[8:12, 2] = 0.5  # Exercise stable ties within a front.
+    ranks = torch.tensor([0] * 17 + [1] * 2 + [2] + [4] * 25 + [7] * 35)
+
+    expected = torch.empty(80)
+    for rank in torch.unique(ranks, sorted=True):
+        indices = torch.nonzero(ranks == rank, as_tuple=False).flatten()
+        expected[indices] = crowding_distance(objectives[indices])
+
+    actual = crowding_distance(objectives, ranks)
+
+    assert torch.equal(torch.isinf(actual), torch.isinf(expected))
+    assert torch.allclose(actual[torch.isfinite(expected)], expected[torch.isfinite(expected)])
+
+
 def test_survival_takes_full_front_then_most_isolated_split_front() -> None:
     objectives = torch.tensor(
         [

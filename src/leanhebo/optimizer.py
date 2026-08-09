@@ -248,8 +248,10 @@ class LeanHEBO:
         )
 
         def objective(dense: torch.Tensor) -> torch.Tensor:
-            repaired = self.space.repair_dense(dense, fixed=fixed)
-            encoded = self.space.encoded_from_dense(repaired, repair=False, fixed=fixed)
+            # NSGA-II already repairs its populations, but encoded conversion must still handle
+            # non-uniform domains such as logarithmic integers. Fuse that final canonicalization
+            # with the dense split instead of materializing and validating a second dense tensor.
+            encoded = self.space.encoded_from_dense(dense, repair=True, fixed=fixed)
             return mace(encoded.continuous, encoded.categorical)
 
         search_objective = objective
@@ -519,13 +521,8 @@ class LeanHEBO:
         saved_config = LeanHEBOConfig.from_dict(state["config"])
         if saved_config != self.config:
             raise ValueError("checkpoint configuration does not match this optimizer")
-        saved_model_observation_version = int(state.get("model_observation_version", -1))
-        # In older schema-v1 checkpoints each retained observation chunk advanced
-        # the store version once. Infer that version instead of reviving a stale
-        # surrogate as current merely because the explicit field is absent.
-        saved_observation_version = int(
-            state.get("observation_version", len(state["observations"]))
-        )
+        saved_model_observation_version = int(state["model_observation_version"])
+        saved_observation_version = int(state["observation_version"])
         saved_store_transform_version = state["store_transform_version"]
         model_was_current = (
             state.get("surrogate") is not None

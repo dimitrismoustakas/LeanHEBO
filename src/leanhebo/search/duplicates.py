@@ -50,6 +50,40 @@ def _pairwise_equal(
     return equal
 
 
+def _duplicate_mask_canonical(
+    population: Tensor,
+    *,
+    existing: Tensor | None,
+    spec: MixedVariableSpec | None,
+    atol: float,
+) -> Tensor:
+    """Return a duplicate mask for already validated, canonical tensors."""
+
+    count = population.shape[0]
+    equal_within = _pairwise_equal(population, population, spec=spec, atol=atol)
+    index = torch.arange(count, device=population.device)
+    earlier_equal = equal_within & (index[None, :] < index[:, None])
+    if atol == 0:
+        has_earlier_copy = earlier_equal.any(dim=1)
+    else:
+        # Approximate equality is not transitive. Compare only against rows retained so far, so a
+        # chain A~=B, B~=C cannot incorrectly remove C when A and C are farther than ``atol``.
+        has_earlier_copy = torch.zeros(count, dtype=torch.bool, device=population.device)
+        for row in range(1, count):
+            retained = ~has_earlier_copy[:row]
+            has_earlier_copy[row] = (earlier_equal[row, :row] & retained).any()
+
+    if existing is None:
+        return has_earlier_copy
+    matches_existing = _pairwise_equal(
+        population,
+        existing,
+        spec=spec,
+        atol=atol,
+    ).any(dim=1)
+    return has_earlier_copy | matches_existing
+
+
 def duplicate_mask(
     population: Tensor,
     *,
@@ -76,35 +110,20 @@ def duplicate_mask(
     else:
         canonical = population
 
-    count = population.shape[0]
-    equal_within = _pairwise_equal(canonical, canonical, spec=spec, atol=atol)
-    index = torch.arange(count, device=population.device)
-    earlier_equal = equal_within & (index[None, :] < index[:, None])
-    if atol == 0:
-        has_earlier_copy = earlier_equal.any(dim=1)
-    else:
-        # Approximate equality is not transitive. Compare only against rows retained so far, so a
-        # chain A~=B, B~=C cannot incorrectly remove C when A and C are farther than ``atol``.
-        has_earlier_copy = torch.zeros(count, dtype=torch.bool, device=population.device)
-        for row in range(1, count):
-            retained = ~has_earlier_copy[:row]
-            has_earlier_copy[row] = (earlier_equal[row, :row] & retained).any()
-
-    if existing is None:
-        return has_earlier_copy
-    _validate_population(existing, name="existing")
-    if existing.shape[1:] != population.shape[1:]:
-        raise ValueError("existing and population must have the same dimensionality")
-    if existing.device != population.device or existing.dtype != population.dtype:
-        raise ValueError("existing and population must share device and dtype")
-    canonical_existing = repair_population(existing, spec) if spec is not None else existing
-    matches_existing = _pairwise_equal(
+    canonical_existing: Tensor | None = None
+    if existing is not None:
+        _validate_population(existing, name="existing")
+        if existing.shape[1:] != population.shape[1:]:
+            raise ValueError("existing and population must have the same dimensionality")
+        if existing.device != population.device or existing.dtype != population.dtype:
+            raise ValueError("existing and population must share device and dtype")
+        canonical_existing = repair_population(existing, spec) if spec is not None else existing
+    return _duplicate_mask_canonical(
         canonical,
-        canonical_existing,
+        existing=canonical_existing,
         spec=spec,
         atol=atol,
-    ).any(dim=1)
-    return has_earlier_copy | matches_existing
+    )
 
 
 @overload
@@ -145,6 +164,24 @@ def eliminate_duplicates(
     if return_indices:
         return unique, indices
     return unique
+
+
+def _eliminate_canonical_duplicates(
+    population: Tensor,
+    *,
+    existing: Tensor | None = None,
+    spec: MixedVariableSpec | None = None,
+    atol: float = 0.0,
+) -> Tensor:
+    """Internal fast path for populations already repaired by the NSGA-II pipeline."""
+
+    keep = ~_duplicate_mask_canonical(
+        population,
+        existing=existing,
+        spec=spec,
+        atol=atol,
+    )
+    return population[keep]
 
 
 # Readable alias for callers that only need the Boolean mask.

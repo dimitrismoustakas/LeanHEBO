@@ -86,11 +86,10 @@ class GPConfig:
             raise ValueError("noise bounds and initial value must be positive and finite")
         if self.noise_initial <= self.noise_lower_bound:
             raise ValueError("noise_initial must be strictly greater than noise_lower_bound")
-        if self.use_fantasy_updates:
-            raise ValueError(
-                "use_fantasy_updates=True is not implemented; use the persistent "
-                "set_train_data update path"
-            )
+        if self.use_fantasy_updates and self.update_steps != 0:
+            raise ValueError("fantasy updates require update_steps=0 so their cache remains valid")
+        if self.use_fantasy_updates and not self.reuse_parameters:
+            raise ValueError("fantasy updates require reuse_parameters=True")
         if self.patience < 1:
             raise ValueError("patience must be positive")
         if not math.isfinite(self.relative_tolerance) or self.relative_tolerance < 0:

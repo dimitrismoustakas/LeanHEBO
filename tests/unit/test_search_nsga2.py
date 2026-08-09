@@ -4,7 +4,13 @@
 import pytest
 import torch
 
-from leanhebo.search import MixedVariableSpec, TorchNSGA2, sobol_population
+from leanhebo.search import (
+    MixedVariableSpec,
+    TorchNSGA2,
+    crowding_distance,
+    repair_population,
+    sobol_population,
+)
 from leanhebo.space import Bool, Categorical, Float, Integer, Space
 
 
@@ -41,6 +47,10 @@ def test_minimize_is_reproducible_from_a_torch_generator() -> None:
     assert torch.equal(first.ranks, second.ranks)
     assert first.population.shape == (24, 2)
     assert first.objectives.shape == (24, 2)
+    torch.testing.assert_close(
+        first.crowding,
+        crowding_distance(first.objectives, first.ranks),
+    )
     assert first.generations == 8
     assert first.objective_calls == 9
     assert first.candidate_evaluations == 24 * 9
@@ -109,6 +119,7 @@ def test_mixed_variable_minimize_preserves_steps_categories_and_context() -> Non
     )
 
     def objective(population: torch.Tensor) -> torch.Tensor:
+        assert torch.equal(population, repair_population(population, spec))
         return torch.stack(
             (
                 population[:, 0].square() + population[:, 1] + population[:, 2],

@@ -199,6 +199,25 @@ def test_sobol_sampling_is_deterministic_and_fixed_values_are_exact() -> None:
         assert record["use_bias"] is True
 
 
+def test_dense_repair_and_encoding_can_be_fused_without_changing_values() -> None:
+    compiled = mixed_space().compile()
+    fixed = compiled.compile_fixed({"width": 12, "activation": "gelu"})
+    raw = (
+        torch.randn(
+            (37, compiled.dense_dimension),
+            generator=torch.Generator().manual_seed(23),
+        )
+        * 20
+    )
+
+    repaired = compiled.repair_dense(raw, fixed=fixed)
+    separate = compiled.encoded_from_dense(repaired, repair=False, fixed=fixed)
+    fused = compiled.encoded_from_dense(raw, repair=True, fixed=fixed)
+
+    assert torch.equal(fused.continuous, separate.continuous)
+    assert torch.equal(fused.categorical, separate.categorical)
+
+
 def test_schema_spec_round_trip_has_stable_fingerprint() -> None:
     space = mixed_space()
     restored = Space.from_spec(space.to_spec())

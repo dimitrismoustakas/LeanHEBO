@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from leanhebo.search.duplicates import eliminate_duplicates
+from leanhebo.search.duplicates import _eliminate_canonical_duplicates
 from leanhebo.search.operators import (
     _validate_generator,
     binary_tournament,
@@ -344,7 +344,7 @@ class TorchNSGA2:
         )
         seeded = torch.cat((incumbent_rows, initial_rows), dim=0)
         if self.eliminate_duplicate_points and seeded.shape[0]:
-            seeded = eliminate_duplicates(
+            seeded = _eliminate_canonical_duplicates(
                 seeded,
                 spec=spec,
                 atol=self.duplicate_tolerance,
@@ -357,7 +357,7 @@ class TorchNSGA2:
             draw_count = remaining if not self.eliminate_duplicate_points else max(remaining * 2, 4)
             candidates = sampler.draw(draw_count)
             if self.eliminate_duplicate_points:
-                candidates = eliminate_duplicates(
+                candidates = _eliminate_canonical_duplicates(
                     candidates,
                     existing=population,
                     spec=spec,
@@ -440,14 +440,13 @@ class TorchNSGA2:
     def _make_offspring(
         self,
         population: Tensor,
-        objectives: Tensor,
+        ranks: Tensor,
+        crowding: Tensor,
         spec: MixedVariableSpec,
         sampler: _SobolPopulationSampler,
         generator: torch.Generator | None,
     ) -> Tensor:
         target = population.shape[0]
-        ranks = non_dominated_sort(objectives)
-        crowding = crowding_distance(objectives, ranks)
         if not self.eliminate_duplicate_points:
             return self._offspring_batch(
                 population,
@@ -472,7 +471,7 @@ class TorchNSGA2:
                 generator,
             )
             existing = torch.cat((population, offspring), dim=0)
-            candidates = eliminate_duplicates(
+            candidates = _eliminate_canonical_duplicates(
                 candidates,
                 existing=existing,
                 spec=spec,
@@ -486,7 +485,7 @@ class TorchNSGA2:
             # refill preserves dense execution and either finds unseen canonical points or proves
             # (within the configured retries) that the available population is exhausted.
             candidates = sampler.draw(max(remaining * 2, 4))
-            candidates = eliminate_duplicates(
+            candidates = _eliminate_canonical_duplicates(
                 candidates,
                 existing=torch.cat((population, offspring), dim=0),
                 spec=spec,
@@ -541,6 +540,8 @@ class TorchNSGA2:
             initial_population=initial_population,
         )
         objectives = self._evaluate(objective, population)
+        ranks = non_dominated_sort(objectives)
+        crowding = crowding_distance(objectives, ranks)
         completed_generations = 0
         objective_calls = 1
         candidate_evaluations = population.shape[0]
@@ -548,7 +549,8 @@ class TorchNSGA2:
         for _ in range(self.generations):
             offspring = self._make_offspring(
                 population,
-                objectives,
+                ranks,
+                crowding,
                 spec,
                 sampler,
                 generator,
@@ -571,13 +573,18 @@ class TorchNSGA2:
                 spec=spec,
                 eliminate_duplicate_points=self.eliminate_duplicate_points,
                 duplicate_tolerance=self.duplicate_tolerance,
+                _population_is_canonical=True,
             )
             population = survival.population
             objectives = survival.objectives
+            ranks = survival.ranks
+            crowding = survival.crowding.clone()
+            # Every front before the final retained front survives intact, so its crowding values
+            # remain valid. Only the possibly truncated final front needs to be refreshed.
+            final_front = ranks == ranks.max()
+            crowding[final_front] = crowding_distance(objectives[final_front])
             completed_generations += 1
 
-        ranks = non_dominated_sort(objectives)
-        crowding = crowding_distance(objectives, ranks)
         return NSGA2Result(
             population=population,
             objectives=objectives,

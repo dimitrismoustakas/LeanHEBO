@@ -102,6 +102,62 @@ def _front_crowding(objectives: Tensor) -> Tensor:
     return distance
 
 
+def _ranked_crowding(objectives: Tensor, ranks: Tensor) -> Tensor:
+    """Compute crowding for every front without a Python loop over fronts.
+
+    A stable value sort followed by a stable rank sort produces the same per-front ordering as
+    sorting each front independently.  Keeping fronts in one tensor avoids hundreds of tiny sort,
+    indexing, and allocation calls when an NSGA-II population contains many Pareto fronts.
+    """
+
+    population_size, objective_count = objectives.shape
+    distance = torch.zeros(
+        population_size,
+        dtype=objectives.dtype,
+        device=objectives.device,
+    )
+    if population_size == 0:
+        return distance
+
+    _, inverse, counts = torch.unique(
+        ranks,
+        sorted=True,
+        return_inverse=True,
+        return_counts=True,
+    )
+    distance[counts[inverse] <= 2] = torch.inf
+
+    for objective_index in range(objective_count):
+        values = objectives[:, objective_index]
+        by_value = torch.argsort(values, stable=True)
+        order = by_value[torch.argsort(ranks[by_value], stable=True)]
+        ordered_ranks = ranks[order]
+        ordered_values = values[order]
+
+        first = torch.ones(population_size, dtype=torch.bool, device=objectives.device)
+        first[1:] = ordered_ranks[1:] != ordered_ranks[:-1]
+        last = torch.ones_like(first)
+        last[:-1] = first[1:]
+        group = first.cumsum(dim=0) - 1
+
+        first_positions = torch.nonzero(first, as_tuple=False).flatten()
+        last_positions = torch.nonzero(last, as_tuple=False).flatten()
+        spans = ordered_values[last_positions] - ordered_values[first_positions]
+        contributes = (counts > 2) & (spans > 0)
+
+        boundary = (first | last) & contributes[group]
+        distance[order[boundary]] = torch.inf
+
+        interior = ~(first | last) & contributes[group]
+        positions = torch.nonzero(interior, as_tuple=False).flatten()
+        if positions.numel():
+            increments = (ordered_values[positions + 1] - ordered_values[positions - 1]) / spans[
+                group[positions]
+            ]
+            distance[order[positions]] += increments
+    return distance
+
+
 def crowding_distance(objectives: Tensor, ranks: Tensor | None = None) -> Tensor:
     """Compute NSGA-II crowding distances within each Pareto front.
 
@@ -126,12 +182,4 @@ def crowding_distance(objectives: Tensor, ranks: Tensor | None = None) -> Tensor
     if bool((ranks < 0).any()):
         raise ValueError("ranks must be non-negative")
 
-    distance = torch.zeros(
-        population_size,
-        dtype=objectives.dtype,
-        device=objectives.device,
-    )
-    for rank in torch.unique(ranks, sorted=True):
-        indices = torch.nonzero(ranks == rank, as_tuple=False).flatten()
-        distance[indices] = _front_crowding(objectives[indices])
-    return distance
+    return _ranked_crowding(objectives, ranks)

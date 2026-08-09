@@ -9,7 +9,7 @@ import math
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
-from typing import Any
+from typing import Any, cast
 
 import gpytorch  # type: ignore[import-untyped]
 import torch
@@ -168,10 +168,6 @@ class ExactGPSurrogate:
         if targets.numel() < 2:
             raise ValueError("at least two observations are required to fit an exact GP")
 
-        previous_input_scaler_version = self.input_scaler_version
-        self.input_scaler.fit(continuous)
-        continuous = self.input_scaler.transform(continuous).contiguous()
-
         first_fit = self.model is None
         full_refit = (
             first_fit
@@ -188,11 +184,48 @@ class ExactGPSurrogate:
         previous_optimizer_state = (
             self.optimizer.state_dict() if self.optimizer is not None else None
         )
+        transform_changed = self.transform_version != transform_version
+
+        if self.config.use_fantasy_updates and not full_refit:
+            fantasy_start = time.perf_counter()
+            fallback_reason = self._try_fantasy_update(
+                continuous,
+                categorical,
+                targets,
+                transform_version=transform_version,
+                optimizer_state=previous_optimizer_state,
+            )
+            if fallback_reason is None:
+                self.transform_version = transform_version
+                self.posterior_cache_version += 1
+                report = FitReport(
+                    kind="fantasy_update",
+                    observations=targets.numel(),
+                    requested_steps=0,
+                    completed_steps=0,
+                    final_loss=None,
+                    wall_time=time.perf_counter() - fantasy_start,
+                    maximum_jitter=self.config.jitter_initial,
+                    jitter_retries=0,
+                )
+                self.fit_count += 1
+                self.update_count += 1
+                self.updates_since_full_refit += 1
+                if self.diagnostics is not None:
+                    self.diagnostics.add_fit_report(report)
+                    self.diagnostics.increment("gp.fantasy_update")
+                return report
+            if self.diagnostics is not None:
+                self.diagnostics.increment("gp.fantasy_fallback")
+                self.diagnostics.increment(f"gp.fantasy_fallback.{fallback_reason}")
+
+        previous_input_scaler_version = self.input_scaler_version
+        self.input_scaler.fit(continuous)
+        continuous = self.input_scaler.transform(continuous).contiguous()
 
         self.train_continuous = continuous
         self.train_categorical = categorical
         self.train_targets = targets
-        transform_changed = self.transform_version != transform_version
         self.transform_version = transform_version
 
         if full_refit or not self.config.use_set_train_data or not self.config.reuse_parameters:
@@ -256,6 +289,107 @@ class ExactGPSurrogate:
             and self.last_full_fit_observations > 0
             and observations >= math.ceil(self.last_full_fit_observations * growth)
         )
+
+    @torch.no_grad()
+    def _try_fantasy_update(
+        self,
+        continuous: torch.Tensor,
+        categorical: torch.Tensor,
+        targets: torch.Tensor,
+        *,
+        transform_version: int,
+        optimizer_state: Mapping[str, Any] | None,
+    ) -> str | None:
+        """Append data through GPyTorch's exact cache update, or return a fallback reason."""
+
+        if (
+            self.model is None
+            or self.likelihood is None
+            or self.optimizer is None
+            or self.train_continuous is None
+            or self.train_categorical is None
+            or self.train_targets is None
+        ):
+            return "missing_state"
+        if self.model.prediction_strategy is None:
+            return "missing_prediction_cache"
+        if transform_version != self.transform_version:
+            return "output_transform_changed"
+
+        old_count = self.train_targets.numel()
+        if targets.numel() <= old_count:
+            return "not_append_only"
+        appended_count = targets.numel() - old_count
+        if appended_count >= old_count:
+            # GPyTorch's fantasy update is intended for a small append relative to the cached
+            # history. Rebuilding is the safer cost profile once the append is as large as it.
+            return "batch_not_smaller_than_history"
+        if (
+            continuous.shape[0] != targets.numel()
+            or categorical.shape[0] != targets.numel()
+            or self.train_continuous.shape[0] != old_count
+            or self.train_categorical.shape[0] != old_count
+        ):
+            return "not_append_only"
+
+        new_continuous = continuous[old_count:]
+        if self.num_continuous:
+            scaler = cast(TorchMinMaxScaler, self.input_scaler)
+            if bool(
+                ((new_continuous < scaler.data_min_) | (new_continuous > scaler.data_max_))
+                .any()
+                .item()
+            ):
+                return "input_transform_changed"
+        scaled_continuous = self.input_scaler.transform(continuous).contiguous()
+        if not torch.equal(scaled_continuous[:old_count], self.train_continuous):
+            return "input_transform_changed"
+        if not torch.equal(categorical[:old_count], self.train_categorical):
+            return "not_append_only"
+        if not torch.equal(targets[:old_count], self.train_targets):
+            return "output_transform_changed"
+
+        old_prediction_strategy = self.model.prediction_strategy
+        old_train_inputs = self.model.train_inputs
+        old_train_targets = self.model.train_targets
+        old_model_likelihood = self.model.likelihood
+        try:
+            with (
+                self._settings(self.config.jitter_initial),
+                gpytorch.settings.fast_pred_var(self.config.fast_pred_var),
+            ):
+                fantasy_model = self.model.get_fantasy_model(
+                    [scaled_continuous[old_count:], categorical[old_count:]],
+                    targets[old_count:],
+                )
+        except RuntimeError as error:
+            if not _looks_numerical(error):
+                raise
+            return "numerical_error"
+        finally:
+            # GPyTorch temporarily removes these fields while deep-copying an ExactGP but does
+            # not protect that mutation with its own finally block.
+            self.model.prediction_strategy = old_prediction_strategy
+            self.model.train_inputs = old_train_inputs
+            self.model.train_targets = old_train_targets
+            self.model.likelihood = old_model_likelihood
+
+        self.model = cast(_MixedExactGP, fantasy_model)
+        self.likelihood = cast(gpytorch.likelihoods.GaussianLikelihood, fantasy_model.likelihood)
+        self.train_continuous = scaled_continuous
+        self.train_categorical = categorical
+        self.train_targets = targets
+        optimizer = self._create_optimizer()
+        if self.config.reuse_optimizer_state and optimizer_state is not None:
+            try:
+                optimizer.load_state_dict(dict(optimizer_state))
+            except (KeyError, TypeError, ValueError, RuntimeError):
+                if self.diagnostics is not None:
+                    self.diagnostics.increment("gp.optimizer_state_incompatible")
+        if isinstance(optimizer, PreconditionedSGLD):
+            optimizer.set_observation_count(targets.numel())
+        self.optimizer = optimizer
+        return None
 
     def _construct_model(
         self,

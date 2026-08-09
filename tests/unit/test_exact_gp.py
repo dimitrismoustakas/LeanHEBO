@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from leanhebo.config import GPConfig, RuntimeConfig
+from leanhebo.diagnostics import Diagnostics
 from leanhebo.gp import ExactGPSurrogate
 from leanhebo.gp.kernel import (
     MixedFeatureExtractor,
@@ -28,6 +30,25 @@ def _surrogate(*, categories: tuple[int, ...] = ()) -> ExactGPSurrogate:
         ),
         runtime=RuntimeConfig(seed=4),
         generator=make_generator("cpu", 4),
+    )
+
+
+def _fantasy_surrogate(*, categories: tuple[int, ...] = ()) -> ExactGPSurrogate:
+    runtime = RuntimeConfig(seed=14)
+    return ExactGPSurrogate(
+        num_continuous=1,
+        category_sizes=categories,
+        config=GPConfig(
+            optimizer="adam",
+            initial_steps=1,
+            update_steps=0,
+            full_refit_interval=None,
+            full_refit_growth_factor=None,
+            use_fantasy_updates=True,
+        ),
+        runtime=runtime,
+        generator=make_generator("cpu", 14),
+        diagnostics=Diagnostics(runtime),
     )
 
 
@@ -55,6 +76,201 @@ def test_persistent_update_reuses_model_and_changes_train_data() -> None:
     assert gp.update_count == 1
     assert gp.model is not None
     assert gp.model.train_targets.shape == (7,)
+
+
+def test_fantasy_update_matches_set_train_data_and_preserves_prediction_cache() -> None:
+    gp = _fantasy_surrogate(categories=(3,))
+    continuous = torch.tensor([[0.0], [0.5], [1.0], [0.75]])
+    categorical = torch.tensor([[0], [1], [2], [1]])
+    targets = torch.tensor([0.0, 0.8, 0.3, 0.4])
+    gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
+    gp.predict(continuous[:1], categorical[:1])
+    assert gp.model is not None and gp.model.prediction_strategy is not None
+    model_id = id(gp.model)
+    scaler_version = gp.input_scaler_version
+
+    reference = ExactGPSurrogate(
+        num_continuous=1,
+        category_sizes=(3,),
+        config=GPConfig(
+            optimizer="adam",
+            initial_steps=1,
+            update_steps=0,
+            full_refit_interval=None,
+            full_refit_growth_factor=None,
+        ),
+        runtime=gp.runtime,
+        generator=make_generator("cpu", 15),
+    )
+    reference.load_state_dict(gp.state_dict())
+
+    report = gp.fit(continuous, categorical, targets, transform_version=1)
+    reference.fit(continuous, categorical, targets, transform_version=1)
+
+    assert report.kind == "fantasy_update"
+    assert gp.model is not None and id(gp.model) != model_id
+    assert gp.model.prediction_strategy is not None
+    assert gp.input_scaler_version == scaler_version
+    assert gp.diagnostics is not None
+    assert gp.diagnostics.counters["gp.fantasy_update"] == 1
+    model_parameters = {id(parameter) for parameter in gp.model.parameters()}
+    assert gp.optimizer is not None
+    assert {
+        id(parameter) for group in gp.optimizer.param_groups for parameter in group["params"]
+    } == model_parameters
+
+    query_continuous = torch.tensor([[0.2], [0.9]])
+    query_categorical = torch.tensor([[0], [2]])
+    actual = gp.predict(query_continuous, query_categorical)
+    expected = reference.predict(query_continuous, query_categorical)
+    for actual_value, expected_value in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_value, expected_value, atol=1e-5, rtol=1e-5)
+
+    restored = _fantasy_surrogate(categories=(3,))
+    restored.load_state_dict(gp.state_dict())
+    assert restored.model is not None and restored.model.prediction_strategy is None
+    restored_values = restored.predict(query_continuous, query_categorical)
+    for restored_value, actual_value in zip(restored_values, actual, strict=True):
+        torch.testing.assert_close(restored_value, actual_value, atol=1e-5, rtol=1e-5)
+
+
+def test_fantasy_update_falls_back_when_input_scaling_would_change() -> None:
+    gp = _fantasy_surrogate()
+    continuous = torch.tensor([[0.0], [0.5], [1.0], [2.0]])
+    categorical = torch.empty((4, 0), dtype=torch.long)
+    targets = continuous[:, 0].square()
+    gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
+    gp.predict(continuous[:1], categorical[:1])
+    scaler_version = gp.input_scaler_version
+
+    report = gp.fit(continuous, categorical, targets, transform_version=1)
+
+    assert report.kind == "update"
+    assert gp.input_scaler_version == scaler_version + 1
+    torch.testing.assert_close(gp.input_scaler.data_max_, torch.tensor([2.0]))  # type: ignore[union-attr]
+    assert gp.diagnostics is not None
+    assert gp.diagnostics.counters["gp.fantasy_fallback"] == 1
+    assert gp.diagnostics.counters["gp.fantasy_fallback.input_transform_changed"] == 1
+
+
+def test_fantasy_update_falls_back_without_an_existing_prediction_cache() -> None:
+    gp = _fantasy_surrogate()
+    continuous = torch.tensor([[0.0], [0.5], [1.0], [0.75]])
+    categorical = torch.empty((4, 0), dtype=torch.long)
+    targets = continuous[:, 0].square()
+    gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
+    assert gp.model is not None and gp.model.prediction_strategy is None
+
+    report = gp.fit(continuous, categorical, targets, transform_version=1)
+
+    assert report.kind == "update"
+    assert gp.diagnostics is not None
+    assert gp.diagnostics.counters["gp.fantasy_fallback.missing_prediction_cache"] == 1
+
+
+def test_fantasy_update_falls_back_when_transformed_targets_change() -> None:
+    gp = _fantasy_surrogate()
+    continuous = torch.tensor([[0.0], [0.5], [1.0], [0.75]])
+    categorical = torch.empty((4, 0), dtype=torch.long)
+    targets = continuous[:, 0].square()
+    gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
+    gp.predict(continuous[:1], categorical[:1])
+
+    report = gp.fit(continuous, categorical, targets, transform_version=2)
+
+    assert report.kind == "update"
+    assert gp.diagnostics is not None
+    assert gp.diagnostics.counters["gp.fantasy_fallback.output_transform_changed"] == 1
+
+
+def test_fantasy_update_rejects_an_append_as_large_as_its_history() -> None:
+    gp = _fantasy_surrogate()
+    continuous = torch.tensor([[0.0], [0.5], [1.0], [0.25], [0.75], [0.6]])
+    categorical = torch.empty((6, 0), dtype=torch.long)
+    targets = continuous[:, 0].square()
+    gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
+    gp.predict(continuous[:1], categorical[:1])
+
+    report = gp.fit(continuous, categorical, targets, transform_version=1)
+
+    assert report.kind == "update"
+    assert gp.diagnostics is not None
+    assert gp.diagnostics.counters["gp.fantasy_fallback.batch_not_smaller_than_history"] == 1
+
+
+def test_fantasy_update_restores_model_state_after_a_numerical_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gp = _fantasy_surrogate()
+    continuous = torch.tensor([[0.0], [0.5], [1.0], [0.75]])
+    categorical = torch.empty((4, 0), dtype=torch.long)
+    targets = continuous[:, 0].square()
+    gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
+    gp.predict(continuous[:1], categorical[:1])
+    assert gp.model is not None and gp.optimizer is not None
+    model = gp.model
+    prediction_strategy = model.prediction_strategy
+    train_inputs = model.train_inputs
+    train_targets = model.train_targets
+    likelihood = model.likelihood
+
+    def fail_after_removing_state(*_: object, **__: object) -> None:
+        model.prediction_strategy = None
+        model.train_inputs = None
+        model.train_targets = None
+        model.likelihood = None
+        raise RuntimeError("cholesky failed")
+
+    monkeypatch.setattr(model, "get_fantasy_model", fail_after_removing_state)
+    reason = gp._try_fantasy_update(
+        continuous,
+        categorical,
+        targets,
+        transform_version=1,
+        optimizer_state=gp.optimizer.state_dict(),
+    )
+
+    assert reason == "numerical_error"
+    assert model.prediction_strategy is prediction_strategy
+    assert model.train_inputs is train_inputs
+    assert model.train_targets is train_targets
+    assert model.likelihood is likelihood
+
+
+def test_fantasy_update_rebinds_psgld_state_to_the_copied_model() -> None:
+    runtime = RuntimeConfig(seed=16)
+    gp = ExactGPSurrogate(
+        num_continuous=1,
+        category_sizes=(),
+        config=GPConfig(
+            optimizer="psgld",
+            initial_steps=1,
+            update_steps=0,
+            full_refit_interval=None,
+            full_refit_growth_factor=None,
+            use_fantasy_updates=True,
+        ),
+        runtime=runtime,
+        generator=make_generator("cpu", 16),
+    )
+    continuous = torch.tensor([[0.0], [0.5], [1.0], [0.75]])
+    categorical = torch.empty((4, 0), dtype=torch.long)
+    targets = continuous[:, 0].square()
+    gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
+    gp.predict(continuous[:1], categorical[:1])
+    assert isinstance(gp.optimizer, PreconditionedSGLD)
+    previous_steps = gp.optimizer.steps
+
+    report = gp.fit(continuous, categorical, targets, transform_version=1)
+
+    assert report.kind == "fantasy_update"
+    assert isinstance(gp.optimizer, PreconditionedSGLD)
+    assert gp.optimizer.steps == previous_steps
+    assert gp.optimizer.factor == 0.25
+    assert gp.model is not None
+    assert {
+        id(parameter) for group in gp.optimizer.param_groups for parameter in group["params"]
+    } == {id(parameter) for parameter in gp.model.parameters()}
 
 
 def test_input_scaler_fits_the_observed_range_instead_of_design_bounds() -> None:
