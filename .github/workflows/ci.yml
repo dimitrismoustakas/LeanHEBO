@@ -17,6 +17,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       PYTHON_VERSION: ${{ matrix.python }}
+      UV_PYTHON: ${{ matrix.python }}
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +35,13 @@ jobs:
         run: uv python install "$PYTHON_VERSION"
       - shell: bash
         run: uv sync --locked --all-groups --all-extras --python "$PYTHON_VERSION"
+      - name: Verify matrix interpreter
+        shell: bash
+        run: >-
+          uv run --locked python -c
+          "import os, sys;
+          expected = tuple(map(int, os.environ['PYTHON_VERSION'].split('.')));
+          assert sys.version_info[:2] == expected, (sys.version, expected)"
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
       - run: uv run --locked mypy src/leanhebo benchmarks
