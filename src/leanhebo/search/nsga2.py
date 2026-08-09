@@ -571,7 +571,10 @@ class TorchNSGA2:
                 combined_objectives,
                 population.shape[0],
                 spec=spec,
-                eliminate_duplicate_points=self.eliminate_duplicate_points,
+                # The initial population is unique, survivors remain a subset, and
+                # ``_make_offspring`` removes matches both within the batch and against the
+                # parents. Rechecking this invariant here only repeats quadratic row work.
+                eliminate_duplicate_points=False,
                 duplicate_tolerance=self.duplicate_tolerance,
                 _population_is_canonical=True,
             )

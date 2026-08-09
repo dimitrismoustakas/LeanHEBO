@@ -4,10 +4,12 @@
 import pytest
 import torch
 
+import leanhebo.search.nsga2 as nsga2_module
 from leanhebo.search import (
     MixedVariableSpec,
     TorchNSGA2,
     crowding_distance,
+    duplicate_mask,
     repair_population,
     sobol_population,
 )
@@ -139,6 +141,36 @@ def test_mixed_variable_minimize_preserves_steps_categories_and_context() -> Non
     assert torch.equal(result.population[:, 2], torch.round(result.population[:, 2]))
     assert torch.equal(result.population[:, 3], torch.full((20,), 0.25))
     assert bool(((result.population >= spec.lower) & (result.population <= spec.upper)).all())
+
+
+def test_combined_parent_offspring_pool_is_unique_before_survival(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_survival = nsga2_module.elitist_survival
+    checked_generations = 0
+
+    def checked_survival(
+        population: torch.Tensor,
+        objectives: torch.Tensor,
+        n_survive: int,
+        **options: object,
+    ) -> object:
+        nonlocal checked_generations
+        assert not bool(duplicate_mask(population).any())
+        checked_generations += 1
+        return original_survival(population, objectives, n_survive, **options)
+
+    monkeypatch.setattr(nsga2_module, "elitist_survival", checked_survival)
+    optimizer = TorchNSGA2(population_size=24, generations=6)
+
+    optimizer.minimize(
+        _biobjective,
+        torch.zeros(2),
+        torch.ones(2),
+        generator=torch.Generator().manual_seed(317),
+    )
+
+    assert checked_generations == 6
 
 
 def test_saturated_discrete_space_returns_all_available_unique_points() -> None:

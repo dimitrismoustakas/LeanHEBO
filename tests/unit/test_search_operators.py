@@ -89,6 +89,44 @@ def test_duplicate_detection_uses_repaired_integer_codes_and_stable_order() -> N
     assert torch.equal(unique, population[[0, 2]])
 
 
+def test_exact_duplicate_detection_preserves_existing_priority_and_signed_zero() -> None:
+    population = torch.tensor(
+        [
+            [-0.0, 1.0],
+            [0.0, 1.0],
+            [2.0, 3.0],
+            [2.0, 3.0],
+            [4.0, 5.0],
+        ],
+        dtype=torch.float64,
+    )
+    existing = torch.tensor([[2.0, 3.0], [9.0, 9.0]], dtype=torch.float64)
+
+    mask = duplicate_mask(population, existing=existing)
+
+    assert mask.tolist() == [False, True, True, True, False]
+
+
+def test_exact_duplicate_detection_supports_empty_dimensions() -> None:
+    population = torch.empty((3, 0))
+
+    assert duplicate_mask(population).tolist() == [False, True, True]
+    assert duplicate_mask(population, existing=torch.empty((1, 0))).tolist() == [True] * 3
+
+
+def test_exact_duplicate_detection_matches_pairwise_reference() -> None:
+    generator = torch.Generator().manual_seed(113)
+    population = torch.randint(-3, 4, (200, 20), generator=generator).to(torch.float32)
+    existing = torch.randint(-3, 4, (100, 20), generator=generator).to(torch.float32)
+    combined = torch.cat((existing, population), dim=0)
+    equal = (population[:, None, :] == combined[None, :, :]).all(dim=-1)
+    combined_indices = torch.arange(combined.shape[0])
+    population_indices = combined_indices[existing.shape[0] :]
+    expected = (equal & (combined_indices[None, :] < population_indices[:, None])).any(dim=1)
+
+    assert torch.equal(duplicate_mask(population, existing=existing), expected)
+
+
 def test_categorical_mutation_always_chooses_an_alternative_at_probability_one() -> None:
     population = torch.tensor([[0.0, 1.0], [1.0, 2.0], [2.0, 0.0]])
     lower = torch.tensor([0.0, 0.0])

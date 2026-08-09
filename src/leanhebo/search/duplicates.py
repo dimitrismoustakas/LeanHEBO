@@ -50,6 +50,46 @@ def _pairwise_equal(
     return equal
 
 
+def _exact_duplicate_mask(population: Tensor, existing: Tensor | None) -> Tensor:
+    """Mark exact row duplicates without materializing a quadratic comparison tensor."""
+
+    count, dimension = population.shape
+    if count == 0:
+        return torch.zeros(0, dtype=torch.bool, device=population.device)
+    if dimension == 0:
+        # ``torch.unique(..., dim=0)`` rejects zero-column tensors. Exact row comparison treats
+        # every such row as equal, so preserve the established public behavior explicitly.
+        mask = torch.arange(count, device=population.device) > 0
+        if existing is not None and existing.shape[0] > 0:
+            mask.fill_(True)
+        return mask
+
+    if existing is None or existing.shape[0] == 0:
+        combined = population
+        offset = 0
+    else:
+        combined = torch.cat((existing, population), dim=0)
+        offset = existing.shape[0]
+
+    unique, inverse = torch.unique(combined, dim=0, return_inverse=True)
+    indices = torch.arange(combined.shape[0], device=population.device)
+    first_indices = torch.full(
+        (unique.shape[0],),
+        combined.shape[0],
+        dtype=torch.long,
+        device=population.device,
+    )
+    first_indices.scatter_reduce_(
+        0,
+        inverse,
+        indices,
+        reduce="amin",
+        include_self=True,
+    )
+    population_indices = indices[offset:]
+    return first_indices[inverse[offset:]] != population_indices
+
+
 def _duplicate_mask_canonical(
     population: Tensor,
     *,
@@ -60,18 +100,18 @@ def _duplicate_mask_canonical(
     """Return a duplicate mask for already validated, canonical tensors."""
 
     count = population.shape[0]
+    if atol == 0:
+        return _exact_duplicate_mask(population, existing)
+
     equal_within = _pairwise_equal(population, population, spec=spec, atol=atol)
     index = torch.arange(count, device=population.device)
     earlier_equal = equal_within & (index[None, :] < index[:, None])
-    if atol == 0:
-        has_earlier_copy = earlier_equal.any(dim=1)
-    else:
-        # Approximate equality is not transitive. Compare only against rows retained so far, so a
-        # chain A~=B, B~=C cannot incorrectly remove C when A and C are farther than ``atol``.
-        has_earlier_copy = torch.zeros(count, dtype=torch.bool, device=population.device)
-        for row in range(1, count):
-            retained = ~has_earlier_copy[:row]
-            has_earlier_copy[row] = (earlier_equal[row, :row] & retained).any()
+    # Approximate equality is not transitive. Compare only against rows retained so far, so a
+    # chain A~=B, B~=C cannot incorrectly remove C when A and C are farther than ``atol``.
+    has_earlier_copy = torch.zeros(count, dtype=torch.bool, device=population.device)
+    for row in range(1, count):
+        retained = ~has_earlier_copy[:row]
+        has_earlier_copy[row] = (earlier_equal[row, :row] & retained).any()
 
     if existing is None:
         return has_earlier_copy
