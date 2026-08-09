@@ -23,12 +23,11 @@ regressions belong on dedicated benchmark hardware.
 
 ## Local foundation
 
-The raw result contract is versioned in `schema/result.schema.json` (currently version 2). The
-helper types in `harness/` record wall and process CPU samples and reject comparisons unless every
-declared work field matches. The work contract includes the GP optimizer and learning rate,
-parameter/optimizer reuse, `set_train_data` use, posterior batching, normalized offspring
-generations, and candidate evaluations. Result writers refuse to overwrite an existing raw
-record.
+The typed raw-result contract in `harness/` records wall and process CPU samples and rejects
+comparisons unless every declared work field matches. The work contract includes the GP optimizer
+and learning rate, parameter/optimizer reuse, `set_train_data` use, posterior batching, normalized
+offspring generations, and candidate evaluations. Result writers refuse to overwrite an existing
+raw record.
 
 Prepare the audited upstream source and its dependencies in an isolated, ignored environment:
 

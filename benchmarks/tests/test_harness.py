@@ -84,7 +84,19 @@ def test_work_budget_normalizes_and_validates_search_candidate_work() -> None:
         )
 
 
-def test_phase_recorder_and_result_writer_emit_finite_versioned_json(tmp_path: Path) -> None:
+def test_work_budget_loader_rejects_missing_and_unknown_fields() -> None:
+    raw = WorkBudget(objective_evaluations=8, batch_size=2).to_dict()
+    missing = dict(raw)
+    missing.pop("dtype")
+    with pytest.raises(ValueError, match=r"missing fields.*dtype"):
+        WorkBudget.from_dict(missing)
+
+    extra: dict[str, object] = {**raw, "legacy_mode": True}
+    with pytest.raises(ValueError, match=r"unknown fields.*legacy_mode"):
+        WorkBudget.from_dict(extra)
+
+
+def test_phase_recorder_and_result_writer_emit_finite_json(tmp_path: Path) -> None:
     recorder = PhaseRecorder()
     with recorder.phase("suggest.total"):
         sum(range(10))
@@ -98,7 +110,7 @@ def test_phase_recorder_and_result_writer_emit_finite_versioned_json(tmp_path: P
     )
     destination = write_result(result, tmp_path / "raw.json")
     payload = json.loads(destination.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
+    assert "schema_version" not in payload
     assert payload["work"]["objective_evaluations"] == 1
     assert payload["phases"]["suggest.total"]["wall_seconds"][0] >= 0
     assert payload["runtime"]["packages"]["torch"] is not None

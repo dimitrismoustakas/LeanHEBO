@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import TypeAlias
 
 Scalar: TypeAlias = str | int | float | bool | None
@@ -135,6 +135,12 @@ class WorkBudget:
     def from_dict(cls, value: Mapping[str, object]) -> WorkBudget:
         """Load the exact work contract stored in a raw benchmark result."""
 
+        expected = {field.name for field in fields(cls)}
+        actual = set(value)
+        if missing := expected - actual:
+            raise ValueError(f"benchmark work is missing fields: {sorted(missing)}")
+        if extra := actual - expected:
+            raise ValueError(f"benchmark work has unknown fields: {sorted(extra)}")
         return cls(**dict(value))  # type: ignore[arg-type]
 
 

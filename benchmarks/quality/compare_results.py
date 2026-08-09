@@ -14,7 +14,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypeAlias
 
-from benchmarks.harness.results import RESULT_SCHEMA_VERSION
 from benchmarks.harness.work import WorkBudget, assert_matched_work
 
 PairKey: TypeAlias = tuple[str, str, int]
@@ -47,11 +46,6 @@ def load_result_set(source: str | Path) -> dict[PairKey, RawResult]:
         raw = json.loads(result_path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise TypeError(f"raw benchmark result is not an object: {result_path}")
-        if raw.get("schema_version") != RESULT_SCHEMA_VERSION:
-            raise ValueError(
-                f"unsupported benchmark schema in {result_path}: "
-                f"expected {RESULT_SCHEMA_VERSION}, got {raw.get('schema_version')!r}"
-            )
         benchmark = _mapping(raw.get("benchmark"), path=f"{result_path}:benchmark")
         suite = _required_string(benchmark.get("suite"), path="benchmark.suite")
         case = _required_string(benchmark.get("case"), path="benchmark.case")
@@ -127,7 +121,6 @@ def build_comparison_report(
         }
 
     return {
-        "report_schema_version": 1,
         "comparison_lane": "changed-work" if work_mismatches else "matched-work",
         "allow_changed_work": allow_changed_work,
         "candidate": _implementation_identity(candidate_results.values()),

@@ -25,8 +25,6 @@ from benchmarks.harness.work import Scalar, WorkBudget
 JsonValue: TypeAlias = Scalar | list["JsonValue"] | dict[str, "JsonValue"]
 PhaseData: TypeAlias = dict[str, dict[str, list[float]]]
 
-RESULT_SCHEMA_VERSION = 2
-
 
 def _json_value(value: object, *, path: str = "value") -> JsonValue:
     if value is None or isinstance(value, (str, bool, int)):
@@ -153,7 +151,7 @@ def _distribution_version(distribution: str) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class BenchmarkResult:
-    """One raw timing or quality result conforming to ``result.schema.json``."""
+    """One validated raw timing or quality result."""
 
     implementation: Mapping[str, object]
     suite: str
@@ -180,7 +178,6 @@ class BenchmarkResult:
 
     def to_dict(self) -> dict[str, JsonValue]:
         result: dict[str, object] = {
-            "schema_version": RESULT_SCHEMA_VERSION,
             "run_id": self.run_id,
             "created_at_utc": self.created_at_utc,
             "implementation": self.implementation,
