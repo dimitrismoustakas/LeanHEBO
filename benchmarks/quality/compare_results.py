@@ -11,6 +11,7 @@ import random
 import statistics
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -26,6 +27,18 @@ _SUGGEST_PHASES = (
 )
 _BOOTSTRAP_RESAMPLES = 2_000
 _BOOTSTRAP_SEED = 17_291
+
+
+@dataclass(frozen=True, slots=True)
+class _NumericalStability:
+    jitter_escalations: int
+    maximum_jitter_parameter: float | None
+    fit_give_ups: int
+    random_prediction_fallbacks: int
+
+    @property
+    def degraded(self) -> bool:
+        return self.fit_give_ups > 0 or self.random_prediction_fallbacks > 0
 
 
 def load_result_set(source: str | Path) -> dict[PairKey, RawResult]:
@@ -105,18 +118,36 @@ def build_comparison_report(
     for (suite, case), keys in sorted(grouped.items()):
         candidate_group = [candidate_results[key] for key in keys]
         baseline_group = [baseline_results[key] for key in keys]
-        candidate_summary = _summarize_records(candidate_group)
-        baseline_summary = _summarize_records(baseline_group)
+        eligible_pairs = [
+            (candidate, baseline)
+            for candidate, baseline in zip(candidate_group, baseline_group, strict=True)
+            if _eligible_for_estimates(candidate) and _eligible_for_estimates(baseline)
+        ]
+        eligible_candidates = [candidate for candidate, _ in eligible_pairs]
+        eligible_baselines = [baseline for _, baseline in eligible_pairs]
+        candidate_summary = _summarize_records(
+            candidate_group,
+            estimate_records=eligible_candidates,
+        )
+        baseline_summary = _summarize_records(
+            baseline_group,
+            estimate_records=eligible_baselines,
+        )
         cases[f"{suite}/{case}"] = {
             "paired_seeds": [key[2] for key in keys],
+            "pair_counts": {
+                "total": len(keys),
+                "eligible": len(eligible_pairs),
+                "excluded": len(keys) - len(eligible_pairs),
+            },
             "candidate": candidate_summary,
             "baseline": baseline_summary,
             "baseline_over_candidate_speedup": {
-                phase: _paired_phase_ratio(candidate_group, baseline_group, phase)
+                phase: _paired_phase_ratio(eligible_candidates, eligible_baselines, phase)
                 for phase in _SUGGEST_PHASES
             },
             "baseline_minus_candidate_regret": _paired_regret_difference(
-                candidate_group, baseline_group
+                eligible_candidates, eligible_baselines
             ),
         }
 
@@ -151,6 +182,17 @@ def render_report(report: Mapping[str, object]) -> str:
         case = _mapping(raw_case, path=f"cases.{label}")
         lines.append("")
         lines.append(f"[{label}]")
+        pair_counts = _mapping(case.get("pair_counts"), path=f"cases.{label}.pair_counts")
+        lines.append(
+            "Estimate pairs: "
+            f"total={pair_counts.get('total', 0)}, "
+            f"eligible={pair_counts.get('eligible', 0)}, "
+            f"excluded={pair_counts.get('excluded', 0)}"
+        )
+        lines.append(
+            "Exclusion rule: omit pairs with raw failures or numerical fit/prediction "
+            "fallbacks from phase and regret estimates; jitter-only pairs remain eligible."
+        )
         for side in ("candidate", "baseline"):
             summary = _mapping(case.get(side), path=f"cases.{label}.{side}")
             lines.append(
@@ -165,6 +207,7 @@ def render_report(report: Mapping[str, object]) -> str:
             if numerical.get("reported_trials", 0):
                 lines.append(
                     f"{side} numerical stability: "
+                    f"degraded_trials={numerical.get('degraded_trials', 0)}, "
                     f"jitter_escalations={numerical.get('jitter_escalations', 0)}, "
                     f"fit_give_ups={numerical.get('fit_give_ups', 0)}, "
                     "random_prediction_fallbacks="
@@ -192,21 +235,24 @@ def render_report(report: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _summarize_records(records: Sequence[RawResult]) -> dict[str, object]:
+def _summarize_records(
+    records: Sequence[RawResult],
+    *,
+    estimate_records: Sequence[RawResult],
+) -> dict[str, object]:
     regrets: list[float] = []
     failures = 0
     duplicates = 0
     phase_samples: dict[str, list[float]] = {name: [] for name in _SUGGEST_PHASES}
     for result in records:
-        raw_failures = result.get("failures", [])
-        if not isinstance(raw_failures, list):
-            raise TypeError("result.failures must be an array")
-        failures += int(bool(raw_failures))
+        failures += int(_has_raw_failure(result))
         metrics = _mapping(result.get("metrics"), path="metrics")
         duplicate_value = metrics.get("duplicate_suggestions", 0)
         if isinstance(duplicate_value, bool) or not isinstance(duplicate_value, int):
             raise TypeError("metrics.duplicate_suggestions must be an integer")
         duplicates += duplicate_value
+
+    for result in estimate_records:
         quality = _mapping(result.get("quality"), path="quality")
         regret = quality.get("normalized_regret")
         if regret is not None:
@@ -242,51 +288,22 @@ def _summarize_numerical_stability(records: Sequence[RawResult]) -> dict[str, ob
     jitter_escalations = 0
     maximum_jitter_parameter: float | None = None
     fit_give_ups = 0
+    fit_give_up_trials = 0
     random_prediction_fallbacks = 0
+    random_prediction_fallback_trials = 0
+    degraded_trials = 0
     for result in records:
-        metrics = _mapping(result.get("metrics"), path="metrics")
-        implementation_metrics = metrics.get("implementation_metrics")
-        if implementation_metrics is None:
+        numerical = _record_numerical_stability(result)
+        if numerical is None:
             continue
-        implementation_map = _mapping(
-            implementation_metrics,
-            path="metrics.implementation_metrics",
-        )
-        raw_numerical = implementation_map.get("numerical_stability")
-        if raw_numerical is None:
-            continue
-        numerical = _mapping(
-            raw_numerical,
-            path="metrics.implementation_metrics.numerical_stability",
-        )
-        jitter = _mapping(numerical.get("jitter"), path="numerical_stability.jitter")
-        fit = _mapping(numerical.get("fit"), path="numerical_stability.fit")
-        prediction = _mapping(
-            numerical.get("prediction"),
-            path="numerical_stability.prediction",
-        )
-        jitter_escalations += _non_negative_int(
-            jitter.get("escalations"),
-            path="numerical_stability.jitter.escalations",
-        )
-        fit_give_ups += _non_negative_int(
-            fit.get("give_ups"),
-            path="numerical_stability.fit.give_ups",
-        )
-        random_prediction_fallbacks += _non_negative_int(
-            prediction.get("random_fallbacks"),
-            path="numerical_stability.prediction.random_fallbacks",
-        )
-        raw_maximum = jitter.get("maximum_parameter")
-        if raw_maximum is not None:
-            maximum = _finite_number(
-                raw_maximum,
-                path="numerical_stability.jitter.maximum_parameter",
-            )
-            if maximum < 0:
-                raise ValueError(
-                    "numerical_stability.jitter.maximum_parameter must be non-negative"
-                )
+        jitter_escalations += numerical.jitter_escalations
+        fit_give_ups += numerical.fit_give_ups
+        random_prediction_fallbacks += numerical.random_prediction_fallbacks
+        fit_give_up_trials += int(numerical.fit_give_ups > 0)
+        random_prediction_fallback_trials += int(numerical.random_prediction_fallbacks > 0)
+        degraded_trials += int(numerical.degraded)
+        maximum = numerical.maximum_jitter_parameter
+        if maximum is not None:
             maximum_jitter_parameter = (
                 maximum
                 if maximum_jitter_parameter is None
@@ -298,8 +315,80 @@ def _summarize_numerical_stability(records: Sequence[RawResult]) -> dict[str, ob
         "jitter_escalations": jitter_escalations,
         "maximum_jitter_parameter": maximum_jitter_parameter,
         "fit_give_ups": fit_give_ups,
+        "fit_give_up_trials": fit_give_up_trials,
         "random_prediction_fallbacks": random_prediction_fallbacks,
+        "random_prediction_fallback_trials": random_prediction_fallback_trials,
+        "degraded_trials": degraded_trials,
     }
+
+
+def _eligible_for_estimates(result: RawResult) -> bool:
+    if _has_raw_failure(result):
+        return False
+    numerical = _record_numerical_stability(result)
+    return numerical is None or not numerical.degraded
+
+
+def _has_raw_failure(result: RawResult) -> bool:
+    raw_failures = result.get("failures", [])
+    if not isinstance(raw_failures, list):
+        raise TypeError("result.failures must be an array")
+    return bool(raw_failures)
+
+
+def _record_numerical_stability(
+    result: RawResult,
+) -> _NumericalStability | None:
+    metrics = _mapping(result.get("metrics"), path="metrics")
+    implementation_metrics = metrics.get("implementation_metrics")
+    if implementation_metrics is None:
+        return None
+    implementation_map = _mapping(
+        implementation_metrics,
+        path="metrics.implementation_metrics",
+    )
+    raw_numerical = implementation_map.get("numerical_stability")
+    if raw_numerical is None:
+        return None
+    numerical = _mapping(
+        raw_numerical,
+        path="metrics.implementation_metrics.numerical_stability",
+    )
+    jitter = _mapping(numerical.get("jitter"), path="numerical_stability.jitter")
+    fit = _mapping(numerical.get("fit"), path="numerical_stability.fit")
+    prediction = _mapping(
+        numerical.get("prediction"),
+        path="numerical_stability.prediction",
+    )
+    escalations = _non_negative_int(
+        jitter.get("escalations"),
+        path="numerical_stability.jitter.escalations",
+    )
+    give_ups = _non_negative_int(
+        fit.get("give_ups"),
+        path="numerical_stability.fit.give_ups",
+    )
+    random_fallbacks = _non_negative_int(
+        prediction.get("random_fallbacks"),
+        path="numerical_stability.prediction.random_fallbacks",
+    )
+    raw_maximum = jitter.get("maximum_parameter")
+    maximum = (
+        None
+        if raw_maximum is None
+        else _finite_number(
+            raw_maximum,
+            path="numerical_stability.jitter.maximum_parameter",
+        )
+    )
+    if maximum is not None and maximum < 0:
+        raise ValueError("numerical_stability.jitter.maximum_parameter must be non-negative")
+    return _NumericalStability(
+        jitter_escalations=escalations,
+        maximum_jitter_parameter=maximum,
+        fit_give_ups=give_ups,
+        random_prediction_fallbacks=random_fallbacks,
+    )
 
 
 def _paired_phase_ratio(

@@ -250,6 +250,98 @@ def test_fixed_history_rejects_non_cold_or_misaligned_settings() -> None:
 
 
 def test_fixed_history_comparator_rejects_different_preloaded_data() -> None:
+    candidate, baseline, key = _valid_comparison_pair()
+
+    report = build_fixed_history_report({key: candidate}, {key: baseline})
+    assert report["comparison_lane"] == "matched-work"
+
+    baseline["metrics"]["history_sha256"] = "2" * 64
+    with pytest.raises(ValueError, match="refusing fixed-history comparison"):
+        build_fixed_history_report({key: candidate}, {key: baseline})
+
+
+@pytest.mark.parametrize(
+    ("metric", "value", "message"),
+    [
+        ("repeats_completed", 1, "repeats_completed must equal repeats_requested"),
+        ("suggestions_returned", 1, "suggestions_returned must equal"),
+        ("invalid_suggestions", 1, "invalid_suggestions must be zero"),
+        ("duplicate_suggestions", 1, "duplicate_suggestions must be zero"),
+    ],
+)
+def test_fixed_history_comparator_rejects_invalid_completion_metrics(
+    metric: str,
+    value: int,
+    message: str,
+) -> None:
+    candidate, baseline, key = _valid_comparison_pair()
+    candidate["metrics"][metric] = value
+
+    with pytest.raises(ValueError, match=message):
+        build_fixed_history_report({key: candidate}, {key: baseline})
+
+
+def test_fixed_history_comparator_rejects_recorded_failures() -> None:
+    candidate, baseline, key = _valid_comparison_pair()
+    baseline["failures"].append({"stage": "suggest", "message": "failed"})
+
+    with pytest.raises(ValueError, match="failures must be empty"):
+        build_fixed_history_report({key: candidate}, {key: baseline})
+
+
+@pytest.mark.parametrize("clock", ["wall_seconds", "process_cpu_seconds"])
+def test_fixed_history_comparator_rejects_incomplete_timing_samples(clock: str) -> None:
+    candidate, baseline, key = _valid_comparison_pair()
+    candidate["phases"][fixed_history.SUGGEST_PHASE][clock].pop()
+
+    with pytest.raises(ValueError, match=rf"{clock} must contain 2 samples"):
+        build_fixed_history_report({key: candidate}, {key: baseline})
+
+
+def test_fixed_history_comparator_rejects_wrong_or_nondeterministic_hashes() -> None:
+    candidate, baseline, key = _valid_comparison_pair()
+    candidate["metrics"]["candidate_sha256"].pop()
+    with pytest.raises(ValueError, match="candidate_sha256 must contain 2 digests"):
+        build_fixed_history_report({key: candidate}, {key: baseline})
+
+    candidate, baseline, key = _valid_comparison_pair()
+    baseline["metrics"]["candidate_sha256"][1] = "4" * 64
+    with pytest.raises(ValueError, match="candidate_sha256 contains nondeterministic digests"):
+        build_fixed_history_report({key: candidate}, {key: baseline})
+
+
+@pytest.mark.parametrize(
+    ("scope", "section", "field", "message"),
+    [
+        ("aggregate", "fit", "give_ups", "fit.give_ups must be zero"),
+        (
+            "repeat",
+            "prediction",
+            "random_fallbacks",
+            "prediction.random_fallbacks must be zero",
+        ),
+    ],
+)
+def test_fixed_history_comparator_rejects_numerical_fallbacks_but_allows_jitter(
+    scope: str,
+    section: str,
+    field: str,
+    message: str,
+) -> None:
+    candidate, baseline, key = _valid_comparison_pair()
+    implementation_metrics = candidate["metrics"]["implementation_metrics"]
+    numerical = (
+        implementation_metrics["numerical_stability"]
+        if scope == "aggregate"
+        else implementation_metrics["repeats"][0]["numerical_stability"]
+    )
+    numerical[section][field] = 1
+
+    with pytest.raises(ValueError, match=message):
+        build_fixed_history_report({key: candidate}, {key: baseline})
+
+
+def _valid_comparison_pair() -> tuple[RawResult, RawResult, tuple[str, str, int]]:
     cell = FixedHistoryCell("continuous", dimension=5, observations=16, batch_size=1)
     work = _FixedAdapter(_settings(cell)).work
     common = BenchmarkResult(
@@ -260,8 +352,8 @@ def test_fixed_history_comparator_rejects_different_preloaded_data() -> None:
         work=work,
         phases={
             fixed_history.SUGGEST_PHASE: {
-                "wall_seconds": [1.0],
-                "process_cpu_seconds": [1.0],
+                "wall_seconds": [1.0, 1.1],
+                "process_cpu_seconds": [0.9, 1.0],
             }
         },
         metrics={
@@ -269,8 +361,35 @@ def test_fixed_history_comparator_rejects_different_preloaded_data() -> None:
             "history_observations": 16,
             "public_dimension": 5,
             "family": "continuous",
-            "repeats_requested": 1,
+            "repeats_requested": 2,
+            "repeats_completed": 2,
+            "suggestions_returned": 2,
+            "invalid_suggestions": 0,
             "duplicate_suggestions": 0,
+            "candidate_sha256": ["3" * 64, "3" * 64],
+            "implementation_metrics": {
+                "repeats": [
+                    {
+                        "numerical_stability": {
+                            "jitter": {"escalations": 1, "maximum_parameter": 0.01},
+                            "fit": {"give_ups": 0},
+                            "prediction": {"random_fallbacks": 0},
+                        }
+                    },
+                    {
+                        "numerical_stability": {
+                            "jitter": {"escalations": 2, "maximum_parameter": 0.1},
+                            "fit": {"give_ups": 0},
+                            "prediction": {"random_fallbacks": 0},
+                        }
+                    },
+                ],
+                "numerical_stability": {
+                    "jitter": {"escalations": 3, "maximum_parameter": 0.1},
+                    "fit": {"give_ups": 0},
+                    "prediction": {"random_fallbacks": 0},
+                },
+            },
         },
         quality={"normalized_regret": None},
     ).to_dict()
@@ -282,10 +401,4 @@ def test_fixed_history_comparator_rejects_different_preloaded_data() -> None:
         "commit": "b" * 40,
     }
     key = ("fixed-history-latency", cell.name, 5)
-
-    report = build_fixed_history_report({key: candidate}, {key: baseline})
-    assert report["comparison_lane"] == "matched-work"
-
-    baseline["metrics"]["history_sha256"] = "2" * 64
-    with pytest.raises(ValueError, match="refusing fixed-history comparison"):
-        build_fixed_history_report({key: candidate}, {key: baseline})
+    return candidate, baseline, key

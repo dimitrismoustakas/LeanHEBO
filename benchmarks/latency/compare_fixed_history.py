@@ -6,13 +6,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 from typing import cast
 
 from benchmarks.harness.work import WorkBudget
-from benchmarks.latency.fixed_history import Family, FixedHistoryCell
+from benchmarks.latency.fixed_history import SUGGEST_PHASE, Family, FixedHistoryCell
 from benchmarks.quality.compare_results import (
     PairKey,
     RawResult,
@@ -43,6 +45,8 @@ def build_fixed_history_report(
         # Delegate to the shared comparator for its complete missing-key diagnostic.
         return build_comparison_report(candidate_results, baseline_results)
     for key in sorted(candidate_keys):
+        _validate_fixed_record(candidate_results[key], path=f"candidate[{key!r}]")
+        _validate_fixed_record(baseline_results[key], path=f"baseline[{key!r}]")
         candidate_identity = _fixed_identity(candidate_results[key])
         baseline_identity = _fixed_identity(baseline_results[key])
         if candidate_identity != baseline_identity:
@@ -51,6 +55,120 @@ def build_fixed_history_report(
                 f"candidate history={candidate_identity}, baseline history={baseline_identity}"
             )
     return build_comparison_report(candidate_results, baseline_results)
+
+
+def _validate_fixed_record(result: Mapping[str, object], *, path: str) -> None:
+    """Reject incomplete or invalid trials before computing timing ratios."""
+
+    failures = result.get("failures")
+    if not isinstance(failures, list):
+        raise TypeError(f"{path}.failures must be an array")
+    if failures:
+        raise ValueError(f"{path}.failures must be empty")
+
+    metrics = _mapping(result.get("metrics"), path=f"{path}.metrics")
+    repeats_requested = _positive_int(
+        metrics.get("repeats_requested"), path=f"{path}.metrics.repeats_requested"
+    )
+    repeats_completed = _non_negative_int(
+        metrics.get("repeats_completed"), path=f"{path}.metrics.repeats_completed"
+    )
+    if repeats_completed != repeats_requested:
+        raise ValueError(
+            f"{path}.metrics.repeats_completed must equal repeats_requested ({repeats_requested})"
+        )
+
+    work = WorkBudget.from_dict(_mapping(result.get("work"), path=f"{path}.work"))
+    suggestions_returned = _non_negative_int(
+        metrics.get("suggestions_returned"), path=f"{path}.metrics.suggestions_returned"
+    )
+    expected_suggestions = repeats_requested * work.batch_size
+    if suggestions_returned != expected_suggestions:
+        raise ValueError(
+            f"{path}.metrics.suggestions_returned must equal repeats_requested * batch_size "
+            f"({expected_suggestions})"
+        )
+    for name in ("invalid_suggestions", "duplicate_suggestions"):
+        value = _non_negative_int(metrics.get(name), path=f"{path}.metrics.{name}")
+        if value:
+            raise ValueError(f"{path}.metrics.{name} must be zero")
+
+    phases = _mapping(result.get("phases"), path=f"{path}.phases")
+    phase_path = f"{path}.phases.{SUGGEST_PHASE}"
+    suggest_phase = _mapping(
+        phases.get(SUGGEST_PHASE),
+        path=phase_path,
+    )
+    for clock in ("wall_seconds", "process_cpu_seconds"):
+        samples = suggest_phase.get(clock)
+        if not isinstance(samples, list):
+            raise TypeError(f"{phase_path}.{clock} must be an array")
+        if len(samples) != repeats_requested:
+            raise ValueError(f"{phase_path}.{clock} must contain {repeats_requested} samples")
+        for index, sample in enumerate(samples):
+            _non_negative_finite_number(
+                sample,
+                path=f"{phase_path}.{clock}[{index}]",
+            )
+
+    candidate_hashes = metrics.get("candidate_sha256")
+    if not isinstance(candidate_hashes, list):
+        raise TypeError(f"{path}.metrics.candidate_sha256 must be an array")
+    if len(candidate_hashes) != repeats_requested:
+        raise ValueError(
+            f"{path}.metrics.candidate_sha256 must contain {repeats_requested} digests"
+        )
+    for index, digest in enumerate(candidate_hashes):
+        _sha256(digest, path=f"{path}.metrics.candidate_sha256[{index}]")
+    if len(set(candidate_hashes)) != 1:
+        raise ValueError(f"{path}.metrics.candidate_sha256 contains nondeterministic digests")
+
+    implementation_metrics = _mapping(
+        metrics.get("implementation_metrics"),
+        path=f"{path}.metrics.implementation_metrics",
+    )
+    repeat_metrics = implementation_metrics.get("repeats")
+    if not isinstance(repeat_metrics, list):
+        raise TypeError(f"{path}.metrics.implementation_metrics.repeats must be an array")
+    if len(repeat_metrics) != repeats_requested:
+        raise ValueError(
+            f"{path}.metrics.implementation_metrics.repeats must contain "
+            f"{repeats_requested} entries"
+        )
+    for index, raw_repeat in enumerate(repeat_metrics):
+        repeat = _mapping(
+            raw_repeat,
+            path=f"{path}.metrics.implementation_metrics.repeats[{index}]",
+        )
+        numerical = repeat.get("numerical_stability")
+        if numerical is not None:
+            _reject_numerical_fallbacks(
+                numerical,
+                path=(
+                    f"{path}.metrics.implementation_metrics.repeats[{index}].numerical_stability"
+                ),
+            )
+    numerical = implementation_metrics.get("numerical_stability")
+    if numerical is not None:
+        _reject_numerical_fallbacks(
+            numerical,
+            path=f"{path}.metrics.implementation_metrics.numerical_stability",
+        )
+
+
+def _reject_numerical_fallbacks(value: object, *, path: str) -> None:
+    numerical = _mapping(value, path=path)
+    fit = _mapping(numerical.get("fit"), path=f"{path}.fit")
+    prediction = _mapping(numerical.get("prediction"), path=f"{path}.prediction")
+    give_ups = _non_negative_int(fit.get("give_ups"), path=f"{path}.fit.give_ups")
+    random_fallbacks = _non_negative_int(
+        prediction.get("random_fallbacks"),
+        path=f"{path}.prediction.random_fallbacks",
+    )
+    if give_ups:
+        raise ValueError(f"{path}.fit.give_ups must be zero")
+    if random_fallbacks:
+        raise ValueError(f"{path}.prediction.random_fallbacks must be zero")
 
 
 def _fixed_identity(result: Mapping[str, object]) -> FixedHistoryIdentity:
@@ -114,6 +232,28 @@ def _positive_int(value: object, *, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise TypeError(f"{path} must be a positive integer")
     return value
+
+
+def _non_negative_int(value: object, *, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise TypeError(f"{path} must be a non-negative integer")
+    return value
+
+
+def _non_negative_finite_number(value: object, *, path: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{path} must be numeric")
+    converted = float(value)
+    if not math.isfinite(converted) or converted < 0:
+        raise ValueError(f"{path} must be finite and non-negative")
+    return converted
+
+
+def _sha256(value: object, *, path: str) -> str:
+    digest = _string(value, path=path)
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError(f"{path} must be a lowercase SHA-256 digest")
+    return digest
 
 
 def _parse_args() -> argparse.Namespace:

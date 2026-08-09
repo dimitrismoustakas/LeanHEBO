@@ -108,6 +108,7 @@ def test_matched_report_pairs_seeds_and_separates_suggestion_phases() -> None:
         dict[str, object], cast(dict[str, object], report["cases"])["toy-quality/sphere-2d"]
     )
     speedups = cast(dict[str, dict[str, object]], case["baseline_over_candidate_speedup"])
+    assert case["pair_counts"] == {"total": 2, "eligible": 2, "excluded": 0}
     first_model = speedups["driver.suggest.first_model"]
     assert first_model["estimate"] == pytest.approx(2.0)
     assert first_model["ci95"] == pytest.approx([2.0, 2.0])
@@ -186,8 +187,87 @@ def test_report_aggregates_and_displays_upstream_numerical_fallbacks() -> None:
         "jitter_escalations": 5,
         "maximum_jitter_parameter": 1e-5,
         "fit_give_ups": 1,
+        "fit_give_up_trials": 1,
         "random_prediction_fallbacks": 4,
+        "random_prediction_fallback_trials": 1,
+        "degraded_trials": 2,
     }
     rendered = render_report(report)
-    assert "baseline numerical stability: jitter_escalations=5" in rendered
+    assert "baseline numerical stability: degraded_trials=2, jitter_escalations=5" in rendered
     assert "fit_give_ups=1, random_prediction_fallbacks=4" in rendered
+
+
+def test_estimates_exclude_failed_or_degraded_pairs_but_keep_jitter_only_pairs() -> None:
+    keys = [("toy-quality", "sphere-2d", seed) for seed in range(5)]
+    candidate_seconds = [1.0, 2.0, 10.0, 20.0, 30.0]
+    baseline_seconds = [2.0, 6.0, 100.0, 200.0, 300.0]
+    candidate = {
+        key: _result(
+            name="leanhebo",
+            seed=key[2],
+            seconds=candidate_seconds[key[2]],
+            work=_work(),
+            regret=[0.1, 0.1, 5.0, 6.0, 7.0][key[2]],
+        )
+        for key in keys
+    }
+    baseline = {
+        key: _result(
+            name="upstream-hebo",
+            seed=key[2],
+            seconds=baseline_seconds[key[2]],
+            work=_work(),
+            regret=[0.2, 0.5, 10.0, 20.0, 30.0][key[2]],
+        )
+        for key in keys
+    }
+    _with_numerical_metrics(
+        baseline[keys[1]],
+        escalations=3,
+        maximum=1e-5,
+        give_ups=0,
+        random_fallbacks=0,
+    )
+    _with_numerical_metrics(
+        baseline[keys[2]],
+        escalations=4,
+        maximum=1e-4,
+        give_ups=1,
+        random_fallbacks=0,
+    )
+    _with_numerical_metrics(
+        candidate[keys[3]],
+        escalations=0,
+        maximum=None,
+        give_ups=0,
+        random_fallbacks=2,
+    )
+    baseline[keys[4]]["failures"] = [{"phase": "driver.suggest.first_model"}]
+
+    report = build_comparison_report(candidate, baseline)
+
+    case = cast(
+        dict[str, object], cast(dict[str, object], report["cases"])["toy-quality/sphere-2d"]
+    )
+    assert case["pair_counts"] == {"total": 5, "eligible": 2, "excluded": 3}
+    speedups = cast(dict[str, dict[str, object]], case["baseline_over_candidate_speedup"])
+    assert speedups["driver.suggest.first_model"]["pairs"] == 2
+    assert speedups["driver.suggest.first_model"]["estimate"] == pytest.approx(2.5)
+    regret = cast(dict[str, object], case["baseline_minus_candidate_regret"])
+    assert regret["pairs"] == 2
+    assert regret["estimate"] == pytest.approx(0.25)
+
+    candidate_summary = cast(dict[str, object], case["candidate"])
+    baseline_summary = cast(dict[str, object], case["baseline"])
+    assert candidate_summary["median_normalized_regret"] == pytest.approx(0.1)
+    assert baseline_summary["median_normalized_regret"] == pytest.approx(0.35)
+    candidate_phases = cast(dict[str, dict[str, object]], candidate_summary["phases"])
+    baseline_phases = cast(dict[str, dict[str, object]], baseline_summary["phases"])
+    assert candidate_phases["driver.suggest.first_model"]["median_seconds"] == pytest.approx(1.5)
+    assert baseline_phases["driver.suggest.first_model"]["median_seconds"] == pytest.approx(4.0)
+    assert cast(dict[str, object], candidate_summary["numerical_stability"])["degraded_trials"] == 1
+    assert cast(dict[str, object], baseline_summary["numerical_stability"])["degraded_trials"] == 1
+
+    rendered = render_report(report)
+    assert "Estimate pairs: total=5, eligible=2, excluded=3" in rendered
+    assert "jitter-only pairs remain eligible" in rendered
