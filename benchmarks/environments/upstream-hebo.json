@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "upstream-hebo",
+  "repository": "https://github.com/huawei-noah/HEBO.git",
+  "commit": "ee6112d39d1a9e9703fecaf9057193e1ec9dae72",
+  "commit_date": "2025-11-27T10:31:46+00:00",
+  "package_subdirectory": "HEBO",
+  "import_name": "hebo",
+  "python": "3.10",
+  "requirements_sha256": "55befc2ef7f79e61be22ca0dd7b95857334933e2f4e921153a4c088d4a2588cb",
+  "setup_sha256": "219174e8d5c817b034cca36713dbfb329e064f5aafad6ef523d1fed899393814",
+  "development_only": true
+}

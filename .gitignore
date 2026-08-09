@@ -1,0 +1,29 @@
+# Local implementation brief (never commit).
+/leanhebo_implementation_plan.md
+
+# Python and uv.
+/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build and benchmark artifacts.
+/build/
+/dist/
+/*.egg-info/
+/.asv/
+/.benchmarks/
+*.prof
+*.leanhebo
+
+# Editors and operating systems.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
