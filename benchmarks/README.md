@@ -97,3 +97,43 @@ cold reconstruction. Generate Lean results with `--model-lifecycle persistent`, 
 steps and posterior batch size, then pass `--allow-changed-work` to the comparator. Its output is
 prominently labeled `CHANGED-WORK`; its timing ratios are observations, not equivalent-work
 speedups. Keep every raw failure and invalid or duplicate suggestion in the report.
+
+## Fixed-history latency matrix
+
+The fixed-history lane separates suggestion latency from an optimization trajectory. Each repeat
+constructs a fresh optimizer, preloads an identical deterministic history outside the timed region,
+and times exactly one cold model-based suggestion. The raw result stores the history SHA-256 and
+validates the returned schema, bounds, batch size, uniqueness, and actual acquisition-search work.
+Repeats are timing samples within one paired seed; they never reuse a fitted model.
+
+The audited matrix covers 16/64/128 observations, continuous and mixed spaces, 5/20 public
+parameters, and suggestion batches 1/4. Mixed spaces repeat a float/integer/categorical parameter
+rotation, so dimension always means the public parameter count. The CLI intentionally defaults to
+only the smallest cell. Run selected cells first rather than launching all 24 combinations
+accidentally:
+
+```powershell
+uv run python -m benchmarks.latency.run_fixed_history `
+  --implementation leanhebo --families continuous,mixed --dimensions 5 `
+  --observations 16,64 --batch-sizes 1,4 --seeds 0,1,2 --repeats 3 `
+  --output-directory benchmarks/results/fixed-history/leanhebo
+
+benchmarks/.upstream/hebo-venv/Scripts/python.exe `
+  -m benchmarks.latency.run_fixed_history `
+  --implementation upstream-hebo --families continuous,mixed --dimensions 5 `
+  --observations 16,64 --batch-sizes 1,4 --seeds 0,1,2 --repeats 3 `
+  --output-directory benchmarks/results/fixed-history/upstream
+
+uv run python -m benchmarks.latency.compare_fixed_history `
+  --candidate benchmarks/results/fixed-history/leanhebo `
+  --baseline benchmarks/results/fixed-history/upstream
+```
+
+Both commands default to the matched cold-work contract: CPU float32, one Torch thread, pSGLD with
+100 fitting steps, population 100, 99 offspring generations, 10,000 acquisition candidates, and
+unbatched posterior evaluation. The fixed-history comparator pairs case and seed, verifies the
+history digest and matrix metadata, fails closed if any declared work differs, and reports this lane
+as `MATCHED-WORK`. In these results,
+`driver.suggest.first_model` is the fixed-history latency sample; regret is deliberately absent.
+Repeats reconstruct model state but share process-level library caches. Use separate invocations or
+seeds when process-cold startup behavior matters, and retain every raw timing sample.
