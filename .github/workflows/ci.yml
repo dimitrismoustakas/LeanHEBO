@@ -44,7 +44,9 @@ jobs:
           assert sys.version_info[:2] == expected, (sys.version, expected)"
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
-      - run: uv run --locked mypy src/leanhebo benchmarks
+      - name: Type check against minimum Python
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
+        run: uv run --locked mypy src/leanhebo benchmarks
       - run: uv run --locked pytest --cov=leanhebo --cov-report=xml
       - run: uv run --locked pytest benchmarks/tests benchmarks/micro/benchmark_matched_search.py
       - run: uv build --no-sources
