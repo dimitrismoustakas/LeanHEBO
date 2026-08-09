@@ -119,7 +119,7 @@ class _FixedAdapter:
     def suggest(self, count: int) -> Suggested:
         assert self.observed == self.work.objective_evaluations
         assert count == self._batch_size
-        rows = [
+        rows: list[dict[str, object]] = [
             {f"x{dimension}": float(row + dimension) / 10 for dimension in range(5)}
             for row in range(count)
         ]
@@ -193,7 +193,9 @@ class _VaryingAdapter(_FixedAdapter):
 
     def suggest(self, count: int) -> Suggested:
         suggested = super().suggest(count)
-        suggested.rows[0]["x0"] = float(suggested.rows[0]["x0"]) + self._offset
+        x0 = suggested.rows[0]["x0"]
+        assert isinstance(x0, float)
+        suggested.rows[0]["x0"] = x0 + self._offset
         return suggested
 
 

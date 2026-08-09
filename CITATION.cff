@@ -6,37 +6,37 @@ version: 0.1.0
 license: MIT
 authors:
   - name: "LeanHEBO contributors"
-preferred-citation:
-  type: article
-  title: "HEBO: Pushing the Limits of Sample-Efficient Hyperparameter Optimisation"
-  authors:
-    - family-names: Cowen-Rivers
-      given-names: Alexander I.
-    - family-names: Lyu
-      given-names: Wenlong
-    - family-names: Tutunov
-      given-names: Rasul
-    - family-names: Wang
-      given-names: Zhi
-    - family-names: Grosnit
-      given-names: Antoine
-    - family-names: Griffiths
-      given-names: Ryan-Rhys
-    - family-names: Maravel
-      given-names: Alexandre M.
-    - family-names: Hao
-      given-names: Jianye
-    - family-names: Wang
-      given-names: Jun
-    - family-names: Peters
-      given-names: Jan
-    - family-names: Bou-Ammar
-      given-names: Haitham
-  journal: "Journal of Artificial Intelligence Research"
-  volume: 74
-  year: 2022
-  doi: "10.1613/jair.1.13643"
+repository-code: "https://github.com/dimitrismoustakas/LeanHEBO"
 references:
+  - type: article
+    title: "HEBO: Pushing the Limits of Sample-Efficient Hyperparameter Optimisation"
+    authors:
+      - family-names: Cowen-Rivers
+        given-names: Alexander I.
+      - family-names: Lyu
+        given-names: Wenlong
+      - family-names: Tutunov
+        given-names: Rasul
+      - family-names: Wang
+        given-names: Zhi
+      - family-names: Grosnit
+        given-names: Antoine
+      - family-names: Griffiths
+        given-names: Ryan-Rhys
+      - family-names: Maravel
+        given-names: Alexandre M.
+      - family-names: Hao
+        given-names: Jianye
+      - family-names: Wang
+        given-names: Jun
+      - family-names: Peters
+        given-names: Jan
+      - family-names: Bou-Ammar
+        given-names: Haitham
+    journal: "Journal of Artificial Intelligence Research"
+    volume: 74
+    year: 2022
+    doi: "10.1613/jair.1.13643"
   - type: software
     title: "HEBO"
     authors:

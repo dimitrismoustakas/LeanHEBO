@@ -1,0 +1,57 @@
+name: Correctness bug
+description: Report incorrect output, state, validation, or optimization behavior
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. For security issues, use a private security advisory instead.
+  - type: input
+    id: version
+    attributes:
+      label: LeanHEBO version or commit
+      placeholder: "0.1.0 or full commit SHA"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include runnable code, inputs, configuration, and any deterministic seed.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the complete traceback or diagnostic output when available.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Report OS, Python, Torch, GPyTorch, device, and dtype.
+      placeholder: |
+        OS:
+        Python:
+        Torch / GPyTorch:
+        Device / dtype:
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: This report does not disclose a security vulnerability.
+          required: true

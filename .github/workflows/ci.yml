@@ -4,22 +4,36 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHON_VERSION: ${{ matrix.python }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python: ["3.11", "3.12"]
+        python: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9  # v7
         with:
           version: "0.12.0"
           enable-cache: true
-      - run: uv python install ${{ matrix.python }}
-      - run: uv sync --locked --all-groups --all-extras --python ${{ matrix.python }}
+      - shell: bash
+        run: uv python install "$PYTHON_VERSION"
+      - shell: bash
+        run: uv sync --locked --all-groups --all-extras --python "$PYTHON_VERSION"
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
       - run: uv run --locked mypy src/leanhebo benchmarks

@@ -5,15 +5,44 @@ optimization strategy. It focuses on the single-objective exact-GP path, persist
 state, mixed-variable search, and explicit CPU or CUDA execution.
 
 LeanHEBO is an independent project. It is not affiliated with or endorsed by Huawei and
-does not claim a new optimization algorithm. See [NOTICE.md](NOTICE.md) and
-[ORIGIN.md](ORIGIN.md) for provenance.
+does not claim a new optimization algorithm. See
+[NOTICE.md](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/NOTICE.md) and
+[ORIGIN.md](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/ORIGIN.md) for provenance.
 
 The package is under active initial development. Its first release targets continuous,
 log-continuous, integer, stepped-integer, power/exponent-integer, Boolean, and categorical
 variables; batch and contextual suggestions; HEBO output warping; MACE acquisition; and a
 tensor-native NSGA-II search.
 
+## Installation
+
+LeanHEBO requires Python 3.11 or newer; the initial release is tested on Python 3.11 through
+3.13. Install the released package with either pip or uv:
+
+```console
+python -m pip install leanhebo
+```
+
+```console
+uv add leanhebo
+```
+
+Pandas and Polars adapters are optional extras:
+
+```console
+python -m pip install "leanhebo[pandas,polars]"
+# or: uv add "leanhebo[pandas,polars]"
+```
+
+CPU is the primary supported path for the initial alpha release. CUDA execution is available,
+but accelerator support depends on the Torch build and the local CUDA stack. Install the
+appropriate Torch build using the [PyTorch installation guide](https://pytorch.org/get-started/locally/)
+before installing LeanHEBO; the package does not silently switch between CPU and CUDA.
+
 ## Quick start
+
+LeanHEBO minimizes the objective values supplied to `observe`. This complete example optimizes
+a small mixed-variable loss:
 
 ```python
 import numpy as np
@@ -22,23 +51,36 @@ from leanhebo import LeanHEBO
 from leanhebo.config import GPConfig, LeanHEBOConfig, RuntimeConfig, SearchConfig
 from leanhebo.space import Bool, Categorical, Float, Integer, Space
 
+
+def objective(row: dict[str, object]) -> float:
+    """Return a loss: LeanHEBO minimizes the values passed to observe."""
+    x = float(row["x"])
+    depth = int(row["depth"])
+    activation_penalty = 0.0 if row["activation"] == "gelu" else 0.25
+    bias_penalty = 0.0 if bool(row["use_bias"]) else 0.1
+    return (x - 0.3) ** 2 + (depth - 6) ** 2 / 25 + activation_penalty + bias_penalty
+
+
 space = Space(
-    Float("learning_rate", 1e-5, 1e-1, log=True),
-    Integer("depth", 1, 20),
+    Float("x", -2.0, 2.0),
+    Integer("depth", 1, 12),
     Categorical("activation", ("relu", "gelu", "silu")),
     Bool("use_bias"),
 )
 config = LeanHEBOConfig(
-    runtime=RuntimeConfig(device="cpu", dtype="float32", seed=7),
-    gp=GPConfig(update_steps=12, full_refit_interval=20),
-    search=SearchConfig(population_size=128, generations=80),
+    runtime=RuntimeConfig(seed=7),
+    # Small settings keep this example quick; use the defaults for real optimization.
+    gp=GPConfig(initial_steps=15, update_steps=3),
+    search=SearchConfig(population_size=32, generations=15),
 )
 optimizer = LeanHEBO(space, config=config)
 
-for _ in range(30):
-    candidates = optimizer.suggest(4)
-    values = np.asarray([objective(row) for row in candidates.to_records()])
-    optimizer.observe(candidates, values)
+for _ in range(3):
+    candidates = optimizer.suggest(3)
+    losses = np.asarray([objective(row) for row in candidates.to_records()])
+    optimizer.observe(candidates, losses)
+
+print(optimizer.best_x.to_records()[0], optimizer.best_y)
 ```
 
 Passing the original `CandidateBatch` to `observe` avoids re-encoding; the observation store takes
@@ -51,16 +93,11 @@ Contextual values are fixed without a DataFrame round trip:
 candidates = optimizer.suggest(8, fix_input={"use_bias": True})
 ```
 
-Pandas and Polars are optional runtime adapters:
-
-```console
-uv sync --extra pandas
-uv sync --extra polars
-```
-
 ```python
+candidates = optimizer.suggest(3)
 frame = candidates.to_polars()  # or candidates.to_pandas()
-optimizer.observe(candidates, objective(frame))
+losses = np.asarray([objective(row) for row in candidates.to_records()])
+optimizer.observe(frame, losses)
 ```
 
 ## Runtime behavior
@@ -71,7 +108,9 @@ formats only. The GP and likelihood survive ordinary updates; new training data 
 with GPyTorch's persistent exact-GP API and receive the configured short update schedule.
 
 CPU is the default. CUDA is selected explicitly with `RuntimeConfig(device="cuda")`; LeanHEBO
-does not silently move work between devices. Both `float32` and `float64` are supported.
+does not silently move work between devices. Both `float32` and `float64` are supported. The
+project is currently alpha software: CPU behavior receives the broadest release validation,
+while CUDA compatibility can vary across Torch, driver, and device combinations.
 
 Importing LeanHEBO does not change Torch or BLAS thread counts. Applications that want an
 explicit process-wide policy should call the startup helper before other Torch work:
@@ -104,7 +143,8 @@ GPs, constrained user objectives, and general multi-objective user objectives ar
 the first release.
 
 No performance or quality claim should be made without the pinned, matched-work benchmark and
-multi-seed quality suite described in [benchmarks/README.md](benchmarks/README.md).
+multi-seed quality suite described in
+[benchmarks/README.md](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/benchmarks/README.md).
 
 ## Development
 

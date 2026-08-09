@@ -151,13 +151,13 @@ def test_upstream_numerical_messages_are_counted_and_preserved() -> None:
     gp_module.print = original_print  # type: ignore[attr-defined]
     diagnostics = _UpstreamNumericalDiagnostics()
     with _capture_upstream_numerical_messages(gp_module, diagnostics):
-        gp_module.print("jitter = 1e-07", flush=True)  # type: ignore[attr-defined]
-        gp_module.print("jitter = 1e-06")  # type: ignore[attr-defined]
-        gp_module.print("jitter is too large, give up fitting GP")  # type: ignore[attr-defined]
-        gp_module.print("jitter is too large, output random predictions")  # type: ignore[attr-defined]
-        gp_module.print("unrelated upstream message")  # type: ignore[attr-defined]
+        gp_module.print("jitter = 1e-07", flush=True)
+        gp_module.print("jitter = 1e-06")
+        gp_module.print("jitter is too large, give up fitting GP")
+        gp_module.print("jitter is too large, output random predictions")
+        gp_module.print("unrelated upstream message")
 
-    assert gp_module.print is original_print  # type: ignore[attr-defined]
+    assert gp_module.print is original_print
     assert forwarded == [
         (("jitter = 1e-07",), {"flush": True}),
         (("jitter = 1e-06",), {}),

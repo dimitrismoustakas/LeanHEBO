@@ -1,0 +1,85 @@
+name: Publish package
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9  # v7
+        with:
+          version: "0.12.0"
+          enable-cache: false
+      - run: uv python install 3.13
+      - name: Verify release tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          uv run --python 3.13 --no-project -- python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+          expected_tag = f"v{project['version']}"
+          if os.environ["RELEASE_TAG"] != expected_tag:
+              raise SystemExit(
+                  f"release tag {os.environ['RELEASE_TAG']!r} does not match {expected_tag!r}"
+              )
+          PY
+      - name: Build wheel and source distribution
+        run: uv build --no-sources
+      - name: Validate distribution metadata
+        run: uvx --from twine==6.1.0 twine check --strict dist/*
+      - name: Smoke-test built wheel
+        shell: bash
+        run: |
+          wheel="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          uv run --isolated --no-project --python 3.13 --with "$wheel" -- python - <<'PY'
+          from leanhebo import LeanHEBO
+          from leanhebo.space import Float, Space
+
+          batch = LeanHEBO(Space(Float("x", -1.0, 1.0))).suggest(2)
+          assert len(batch) == 2
+          PY
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/leanhebo
+    permissions:
+      id-token: write  # Required only here for PyPI Trusted Publishing.
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Publish distribution
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
+        with:
+          packages-dir: dist/

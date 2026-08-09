@@ -1,0 +1,70 @@
+name: Performance report
+description: Report a reproducible regression or performance comparison
+title: "[Performance] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read the benchmark policy before reporting results. Do not commit generated results or reports.
+  - type: input
+    id: candidate
+    attributes:
+      label: Candidate commit
+      description: Use the full commit SHA.
+    validations:
+      required: true
+  - type: input
+    id: baseline
+    attributes:
+      label: Baseline commit or release
+      description: For upstream HEBO comparisons, use the pinned commit from benchmarks/README.md.
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload and configuration
+      description: Include cases, dimensions, observations, batches, seeds, model lifecycle, GP steps, and search work.
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: Exact commands
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include hardware, OS, Python, Torch, GPyTorch, device, dtype, and thread counts.
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results and raw data
+      description: >-
+        Report every sample, failure, uncertainty interval, and a durable attachment or link to
+        unmodified raw data.
+    validations:
+      required: true
+  - type: textarea
+    id: interpretation
+    attributes:
+      label: Interpretation
+      description: State whether work is exactly matched and distinguish measurements from conclusions.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Reproducibility checks
+      options:
+        - label: I included all samples and failures without filtering out unfavorable runs.
+          required: true
+        - label: The comparison uses matched work, or I clearly labeled it changed-work.
+          required: true
+        - label: I did not commit generated benchmark data or reports to the repository.
+          required: true
