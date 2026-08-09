@@ -8,6 +8,7 @@ import os
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from types import ModuleType
 from typing import ClassVar
 
 import pytest
@@ -16,7 +17,14 @@ from benchmarks.environments.prepare_upstream import UpstreamManifest
 from benchmarks.harness.results import BenchmarkResult, PhaseRecorder, write_result
 from benchmarks.harness.work import WorkBudget, assert_matched_work
 from benchmarks.quality.objectives import MIXED_3D, SPHERE_2D
-from benchmarks.quality.runner import RunSettings, Suggested, make_adapter, run_trial
+from benchmarks.quality.runner import (
+    RunSettings,
+    Suggested,
+    _capture_upstream_numerical_messages,
+    _UpstreamNumericalDiagnostics,
+    make_adapter,
+    run_trial,
+)
 
 
 def test_work_budget_fails_closed_on_unknown_or_changed_work() -> None:
@@ -131,6 +139,50 @@ def test_toy_objectives_have_exact_known_optima() -> None:
     assert SPHERE_2D.evaluate([{"x0": 0.0, "x1": 0.0}]) == [0.0]
     assert MIXED_3D.evaluate([{"x": 1.25, "depth": 3, "kind": "b"}]) == [0.0]
     assert MIXED_3D.normalized_regret(MIXED_3D.regret_scale) == 1.0
+
+
+def test_upstream_numerical_messages_are_counted_and_preserved() -> None:
+    gp_module = ModuleType("fake_upstream_gp")
+    forwarded: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def original_print(*values: object, **options: object) -> None:
+        forwarded.append((values, options))
+
+    gp_module.print = original_print  # type: ignore[attr-defined]
+    diagnostics = _UpstreamNumericalDiagnostics()
+    with _capture_upstream_numerical_messages(gp_module, diagnostics):
+        gp_module.print("jitter = 1e-07", flush=True)  # type: ignore[attr-defined]
+        gp_module.print("jitter = 1e-06")  # type: ignore[attr-defined]
+        gp_module.print("jitter is too large, give up fitting GP")  # type: ignore[attr-defined]
+        gp_module.print("jitter is too large, output random predictions")  # type: ignore[attr-defined]
+        gp_module.print("unrelated upstream message")  # type: ignore[attr-defined]
+
+    assert gp_module.print is original_print  # type: ignore[attr-defined]
+    assert forwarded == [
+        (("jitter = 1e-07",), {"flush": True}),
+        (("jitter = 1e-06",), {}),
+        (("jitter is too large, give up fitting GP",), {}),
+        (("jitter is too large, output random predictions",), {}),
+        (("unrelated upstream message",), {}),
+    ]
+    assert diagnostics.to_dict() == {
+        "jitter": {"escalations": 2, "maximum_parameter": 1e-6},
+        "fit": {"give_ups": 1},
+        "prediction": {"random_fallbacks": 1},
+    }
+
+
+def test_upstream_numerical_capture_restores_missing_print_after_failure() -> None:
+    gp_module = ModuleType("fake_upstream_gp")
+    diagnostics = _UpstreamNumericalDiagnostics()
+
+    with (
+        pytest.raises(RuntimeError, match="boom"),
+        _capture_upstream_numerical_messages(gp_module, diagnostics),
+    ):
+        raise RuntimeError("boom")
+
+    assert not hasattr(gp_module, "print")
 
 
 def test_leanhebo_quality_smoke_uses_public_suggest_observe_contract() -> None:

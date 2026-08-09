@@ -4,14 +4,17 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib
 import json
 import math
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from types import ModuleType
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 from benchmarks.harness.results import BenchmarkResult, PhaseRecorder
 from benchmarks.harness.work import WorkBudget
@@ -82,6 +85,75 @@ class Suggested:
     rows: list[dict[str, object]]
     native: object
     search_report: Mapping[str, int] | None = None
+
+
+@dataclass(slots=True)
+class _UpstreamNumericalDiagnostics:
+    """Events that pinned HEBO reports only by printing to standard output."""
+
+    jitter_escalations: int = 0
+    maximum_jitter_parameter: float | None = None
+    fit_give_ups: int = 0
+    random_prediction_fallbacks: int = 0
+
+    def record(self, values: tuple[object, ...]) -> None:
+        if len(values) != 1 or not isinstance(values[0], str):
+            return
+        message = values[0]
+        if message.startswith("jitter = "):
+            try:
+                jitter = float(message.removeprefix("jitter = "))
+            except ValueError:
+                return
+            self.jitter_escalations += 1
+            if self.maximum_jitter_parameter is None:
+                self.maximum_jitter_parameter = jitter
+            else:
+                self.maximum_jitter_parameter = max(self.maximum_jitter_parameter, jitter)
+        elif message == "jitter is too large, give up fitting GP":
+            self.fit_give_ups += 1
+        elif message == "jitter is too large, output random predictions":
+            self.random_prediction_fallbacks += 1
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "jitter": {
+                "escalations": self.jitter_escalations,
+                "maximum_parameter": self.maximum_jitter_parameter,
+            },
+            "fit": {"give_ups": self.fit_give_ups},
+            "prediction": {"random_fallbacks": self.random_prediction_fallbacks},
+        }
+
+
+@contextmanager
+def _capture_upstream_numerical_messages(
+    gp_module: ModuleType,
+    diagnostics: _UpstreamNumericalDiagnostics,
+) -> Iterator[None]:
+    """Observe pinned HEBO's numerical messages while preserving their output."""
+
+    missing = object()
+    previous = getattr(gp_module, "print", missing)
+    if previous is missing:
+        downstream: Callable[..., object] = builtins.print
+    elif callable(previous):
+        downstream = cast("Callable[..., object]", previous)
+    else:
+        raise TypeError("upstream GP module has a non-callable print override")
+
+    def observed_print(*values: object, **options: object) -> None:
+        diagnostics.record(values)
+        downstream(*values, **options)
+
+    gp_module.print = observed_print  # type: ignore[attr-defined]
+    try:
+        yield
+    finally:
+        if previous is missing:
+            delattr(gp_module, "print")
+        else:
+            gp_module.print = previous  # type: ignore[attr-defined]
 
 
 class OptimizerAdapter(Protocol):
@@ -232,6 +304,7 @@ class UpstreamHEBOAdapter:
         torch = importlib.import_module("torch")
         acquisition_module = importlib.import_module("hebo.acquisitions.acq")
         design_module = importlib.import_module("hebo.design_space.design_space")
+        gp_module = importlib.import_module("hebo.models.gp.gp")
         optimizer_module = importlib.import_module("hebo.optimizers.hebo")
         if settings.device != "cpu" or settings.dtype != "float32":
             raise ValueError("the pinned upstream HEBO lane supports only CPU float32")
@@ -254,6 +327,8 @@ class UpstreamHEBOAdapter:
         self._active_search = {"objective_calls": 0, "candidate_evaluations": 0}
         self._search_reports: list[dict[str, int]] = []
         self._mace_class = acquisition_module.MACE
+        self._gp_module = gp_module
+        self._numerical_diagnostics = _UpstreamNumericalDiagnostics()
 
         self._optimizer = optimizer_module.HEBO(
             design_space,
@@ -324,7 +399,11 @@ class UpstreamHEBOAdapter:
 
         self._mace_class.eval = counted_eval
         try:
-            candidates = self._optimizer.suggest(count)
+            with _capture_upstream_numerical_messages(
+                self._gp_module,
+                self._numerical_diagnostics,
+            ):
+                candidates = self._optimizer.suggest(count)
         finally:
             self._mace_class.eval = original_eval
         if model_based:
@@ -348,6 +427,7 @@ class UpstreamHEBOAdapter:
     def metrics(self) -> Mapping[str, object]:
         return {
             "observations": int(self._optimizer.y.shape[0]),
+            "numerical_stability": self._numerical_diagnostics.to_dict(),
             "search_reports": list(self._search_reports),
         }
 

@@ -158,6 +158,18 @@ def render_report(report: Mapping[str, object]) -> str:
                 f"duplicates={summary.get('duplicate_suggestions', 0)}, "
                 f"median_regret={_display(summary.get('median_normalized_regret'))}"
             )
+            numerical = _mapping(
+                summary.get("numerical_stability"),
+                path=f"cases.{label}.{side}.numerical_stability",
+            )
+            if numerical.get("reported_trials", 0):
+                lines.append(
+                    f"{side} numerical stability: "
+                    f"jitter_escalations={numerical.get('jitter_escalations', 0)}, "
+                    f"fit_give_ups={numerical.get('fit_give_ups', 0)}, "
+                    "random_prediction_fallbacks="
+                    f"{numerical.get('random_prediction_fallbacks', 0)}"
+                )
         speedups = _mapping(
             case.get("baseline_over_candidate_speedup"),
             path=f"cases.{label}.baseline_over_candidate_speedup",
@@ -221,6 +233,72 @@ def _summarize_records(records: Sequence[RawResult]) -> dict[str, object]:
         "median_normalized_regret": None if not regrets else statistics.median(regrets),
         "mean_normalized_regret": None if not regrets else statistics.fmean(regrets),
         "phases": {name: _sample_summary(samples) for name, samples in phase_samples.items()},
+        "numerical_stability": _summarize_numerical_stability(records),
+    }
+
+
+def _summarize_numerical_stability(records: Sequence[RawResult]) -> dict[str, object]:
+    reported_trials = 0
+    jitter_escalations = 0
+    maximum_jitter_parameter: float | None = None
+    fit_give_ups = 0
+    random_prediction_fallbacks = 0
+    for result in records:
+        metrics = _mapping(result.get("metrics"), path="metrics")
+        implementation_metrics = metrics.get("implementation_metrics")
+        if implementation_metrics is None:
+            continue
+        implementation_map = _mapping(
+            implementation_metrics,
+            path="metrics.implementation_metrics",
+        )
+        raw_numerical = implementation_map.get("numerical_stability")
+        if raw_numerical is None:
+            continue
+        numerical = _mapping(
+            raw_numerical,
+            path="metrics.implementation_metrics.numerical_stability",
+        )
+        jitter = _mapping(numerical.get("jitter"), path="numerical_stability.jitter")
+        fit = _mapping(numerical.get("fit"), path="numerical_stability.fit")
+        prediction = _mapping(
+            numerical.get("prediction"),
+            path="numerical_stability.prediction",
+        )
+        jitter_escalations += _non_negative_int(
+            jitter.get("escalations"),
+            path="numerical_stability.jitter.escalations",
+        )
+        fit_give_ups += _non_negative_int(
+            fit.get("give_ups"),
+            path="numerical_stability.fit.give_ups",
+        )
+        random_prediction_fallbacks += _non_negative_int(
+            prediction.get("random_fallbacks"),
+            path="numerical_stability.prediction.random_fallbacks",
+        )
+        raw_maximum = jitter.get("maximum_parameter")
+        if raw_maximum is not None:
+            maximum = _finite_number(
+                raw_maximum,
+                path="numerical_stability.jitter.maximum_parameter",
+            )
+            if maximum < 0:
+                raise ValueError(
+                    "numerical_stability.jitter.maximum_parameter must be non-negative"
+                )
+            maximum_jitter_parameter = (
+                maximum
+                if maximum_jitter_parameter is None
+                else max(maximum_jitter_parameter, maximum)
+            )
+        reported_trials += 1
+    return {
+        "reported_trials": reported_trials,
+        "jitter_escalations": jitter_escalations,
+        "maximum_jitter_parameter": maximum_jitter_parameter,
+        "fit_give_ups": fit_give_ups,
+        "random_prediction_fallbacks": random_prediction_fallbacks,
     }
 
 
@@ -345,6 +423,14 @@ def _finite_number(value: object, *, path: str) -> float:
     if not math.isfinite(converted):
         raise ValueError(f"{path} must be finite")
     return converted
+
+
+def _non_negative_int(value: object, *, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{path} must be an integer")
+    if value < 0:
+        raise ValueError(f"{path} must be non-negative")
+    return value
 
 
 def _display(value: object) -> str:

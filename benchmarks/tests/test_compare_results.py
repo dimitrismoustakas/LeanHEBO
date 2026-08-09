@@ -64,6 +64,24 @@ def _result(*, name: str, seed: int, seconds: float, work: WorkBudget, regret: f
     return cast(RawResult, result.to_dict())
 
 
+def _with_numerical_metrics(
+    result: RawResult,
+    *,
+    escalations: int,
+    maximum: float | None,
+    give_ups: int,
+    random_fallbacks: int,
+) -> RawResult:
+    result["metrics"]["implementation_metrics"] = {
+        "numerical_stability": {
+            "jitter": {"escalations": escalations, "maximum_parameter": maximum},
+            "fit": {"give_ups": give_ups},
+            "prediction": {"random_fallbacks": random_fallbacks},
+        }
+    }
+    return result
+
+
 def test_matched_report_pairs_seeds_and_separates_suggestion_phases() -> None:
     work = _work()
     candidate: dict[PairKey, RawResult] = {
@@ -130,3 +148,46 @@ def test_changed_work_is_rejected_unless_explicitly_labeled() -> None:
     rendered = render_report(report)
     assert "Comparison lane: CHANGED-WORK" in rendered
     assert "not speedups" in rendered
+
+
+def test_report_aggregates_and_displays_upstream_numerical_fallbacks() -> None:
+    key_zero = ("toy-quality", "sphere-2d", 0)
+    key_one = ("toy-quality", "sphere-2d", 1)
+    candidate = {
+        key: _result(name="leanhebo", seed=key[2], seconds=1.0, work=_work(), regret=0.1)
+        for key in (key_zero, key_one)
+    }
+    baseline = {
+        key_zero: _with_numerical_metrics(
+            _result(name="upstream-hebo", seed=0, seconds=2.0, work=_work(), regret=0.2),
+            escalations=2,
+            maximum=1e-6,
+            give_ups=1,
+            random_fallbacks=0,
+        ),
+        key_one: _with_numerical_metrics(
+            _result(name="upstream-hebo", seed=1, seconds=2.0, work=_work(), regret=0.2),
+            escalations=3,
+            maximum=1e-5,
+            give_ups=0,
+            random_fallbacks=4,
+        ),
+    }
+
+    report = build_comparison_report(candidate, baseline)
+
+    case = cast(
+        dict[str, object], cast(dict[str, object], report["cases"])["toy-quality/sphere-2d"]
+    )
+    baseline_summary = cast(dict[str, object], case["baseline"])
+    numerical = cast(dict[str, object], baseline_summary["numerical_stability"])
+    assert numerical == {
+        "reported_trials": 2,
+        "jitter_escalations": 5,
+        "maximum_jitter_parameter": 1e-5,
+        "fit_give_ups": 1,
+        "random_prediction_fallbacks": 4,
+    }
+    rendered = render_report(report)
+    assert "baseline numerical stability: jitter_escalations=5" in rendered
+    assert "fit_give_ups=1, random_prediction_fallbacks=4" in rendered
