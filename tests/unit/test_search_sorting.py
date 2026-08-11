@@ -7,7 +7,6 @@ from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from leanhebo.search import (
     crowding_distance,
     dominance_matrix,
-    non_dominated_fronts,
     non_dominated_sort,
     select_survivors,
 )
@@ -26,11 +25,9 @@ def test_non_dominated_sort_assigns_expected_fronts() -> None:
 
     dominates = dominance_matrix(objectives)
     ranks = non_dominated_sort(objectives)
-    fronts = non_dominated_fronts(objectives)
 
     assert not bool(torch.diagonal(dominates).any())
     assert torch.equal(ranks, torch.tensor([0, 0, 0, 1, 2]))
-    assert [front.tolist() for front in fronts] == [[0, 1, 2], [3], [4]]
 
 
 def test_dominance_matrix_matches_strict_pairwise_reference_with_ties() -> None:

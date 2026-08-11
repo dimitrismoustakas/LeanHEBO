@@ -6,7 +6,7 @@ import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from leanhebo.data import ObservationStore
+from leanhebo.data.store import ObservationStore
 from leanhebo.space import Bool, Integer, Space
 
 
@@ -28,13 +28,16 @@ def test_duplicate_membership_never_removes_a_distinct_point(values: list[int]) 
 def test_chunked_materialization_preserves_append_order(chunk_sizes: list[int]) -> None:
     compiled = Space(Integer("x", 0, 100)).compile()
     store = ObservationStore(compiled)
+    expected_records: list[dict[str, object]] = []
     expected: list[float] = []
     offset = 0
     for chunk_size in chunk_sizes:
         records = [{"x": (offset + index) % 101} for index in range(chunk_size)]
         outcomes = [float(offset + index) for index in range(chunk_size)]
         store.append(records, outcomes)
+        expected_records.extend(records)
         expected.extend(outcomes)
         offset += chunk_size
-    assert store.chunk_count == len(chunk_sizes)
-    assert torch.equal(store.y, torch.tensor(expected))
+    materialized = store.materialize()
+    assert compiled.decode(materialized.encoded).to_records() == expected_records
+    assert torch.equal(materialized.y, torch.tensor(expected))

@@ -272,20 +272,35 @@ class LeanHEBOAdapter:
     def metrics(self) -> Mapping[str, object]:
         diagnostics = self._optimizer.diagnostics
         surrogate = self._optimizer.surrogate
+        reports = diagnostics.fit_reports
+        fit_reports = [
+            {
+                "kind": report.kind,
+                "observations": report.observations,
+                "requested_steps": report.requested_steps,
+                "completed_steps": report.completed_steps,
+                "maximum_jitter": report.maximum_jitter,
+                "jitter_retries": report.jitter_retries,
+                "failure": report.failure,
+            }
+            for report in reports
+        ]
+        escalated = [report for report in reports if report.jitter_retries]
         return {
             "diagnostic_counters": dict(diagnostics.counters),
-            "fit_reports": [
-                {
-                    "kind": report.kind,
-                    "observations": report.observations,
-                    "requested_steps": report.requested_steps,
-                    "completed_steps": report.completed_steps,
-                    "maximum_jitter": report.maximum_jitter,
-                    "jitter_retries": report.jitter_retries,
-                    "failure": report.failure,
-                }
-                for report in diagnostics.fit_reports
-            ],
+            "fit_reports": fit_reports,
+            "numerical_stability": {
+                "jitter": {
+                    "escalations": sum(report.jitter_retries for report in reports),
+                    "maximum_parameter": (
+                        None
+                        if not escalated
+                        else max(report.maximum_jitter for report in escalated)
+                    ),
+                },
+                "fit": {"give_ups": sum(report.failure is not None for report in reports)},
+                "prediction": {"random_fallbacks": 0},
+            },
             "posterior_calls": None if surrogate is None else surrogate.posterior_calls,
             "search_reports": list(self._search_reports),
         }
@@ -300,16 +315,34 @@ class UpstreamHEBOAdapter:
     _OFFSPRING_GENERATIONS = _PYMOO_GENERATIONS - 1
 
     def __init__(self, objective: ToyObjective, settings: RunSettings, seed: int) -> None:
+        incompatible: list[str] = []
+        if settings.device != "cpu" or settings.dtype != "float32":
+            incompatible.append(
+                f"device='cpu' and dtype='float32' (got {settings.device!r}, {settings.dtype!r})"
+            )
+        if settings.model_lifecycle != "cold":
+            incompatible.append(f"model_lifecycle='cold' (got {settings.model_lifecycle!r})")
+        if settings.population_size != self._POPULATION_SIZE:
+            incompatible.append(
+                f"population_size={self._POPULATION_SIZE} (got {settings.population_size})"
+            )
+        if settings.generations != self._OFFSPRING_GENERATIONS:
+            incompatible.append(
+                f"generations={self._OFFSPRING_GENERATIONS} (got {settings.generations})"
+            )
+        if settings.posterior_batch_size is not None:
+            incompatible.append(f"posterior_batch_size=None (got {settings.posterior_batch_size})")
+        if incompatible:
+            raise ValueError(
+                "upstream-hebo cannot apply these settings: " + "; ".join(incompatible)
+            )
+
         numpy = importlib.import_module("numpy")
         torch = importlib.import_module("torch")
         acquisition_module = importlib.import_module("hebo.acquisitions.acq")
         design_module = importlib.import_module("hebo.design_space.design_space")
         gp_module = importlib.import_module("hebo.models.gp.gp")
         optimizer_module = importlib.import_module("hebo.optimizers.hebo")
-        if settings.device != "cpu" or settings.dtype != "float32":
-            raise ValueError("the pinned upstream HEBO lane supports only CPU float32")
-        if settings.model_lifecycle != "cold":
-            raise ValueError("the pinned upstream HEBO implementation always uses a cold model")
         torch.set_num_threads(settings.torch_threads)
         numpy.random.seed(seed)
         torch.manual_seed(seed)

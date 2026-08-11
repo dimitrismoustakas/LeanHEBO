@@ -6,20 +6,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import cast
 
 import torch
 from torch import Tensor
-
-
-class CompiledSearchMetadata(Protocol):
-    """Structural interface consumed from ``CompiledSpace`` by the search layer."""
-
-    dense_lower_bounds: Tensor
-    dense_upper_bounds: Tensor
-    search_integer_mask: Tensor
-    categorical_mask: Tensor
-    search_steps: Tensor
 
 
 def _as_1d_tensor(
@@ -191,34 +181,6 @@ class MixedVariableSpec:
 
         return self.lower.numel()
 
-    @classmethod
-    def from_compiled_space(
-        cls,
-        compiled: CompiledSearchMetadata,
-        *,
-        fixed_mask: Tensor | None = None,
-        fixed_values: Tensor | None = None,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> MixedVariableSpec:
-        """Build search metadata from the structural ``CompiledSpace`` tensor interface.
-
-        Contextual callers should pass ``CompiledSpace.fixed_mask(...)`` and
-        ``CompiledSpace.dense_fixed_values(...)``. This method deliberately depends only on dense
-        tensors, keeping the evolutionary loop independent of codecs and parameter objects.
-        """
-
-        spec = cls(
-            lower=compiled.dense_lower_bounds,
-            upper=compiled.dense_upper_bounds,
-            integer_mask=compiled.search_integer_mask,
-            categorical_mask=compiled.categorical_mask,
-            steps=compiled.search_steps,
-            fixed_mask=fixed_mask,
-            fixed_values=fixed_values,
-        )
-        return spec.to(device=device, dtype=dtype)
-
     @property
     def numeric_mask(self) -> Tensor:
         """Mask of continuous and integer (but not categorical) columns."""
@@ -236,28 +198,6 @@ class MixedVariableSpec:
         """Mask of categorical columns that evolutionary operators may change."""
 
         return self.categorical_mask & ~self.fixed_mask
-
-    def to(
-        self,
-        *,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> MixedVariableSpec:
-        """Return an equivalent specification on ``device`` and with ``dtype``."""
-
-        target_device = self.lower.device if device is None else torch.device(device)
-        target_dtype = self.lower.dtype if dtype is None else dtype
-        if not target_dtype.is_floating_point:
-            raise TypeError("search populations require a floating-point dtype")
-        return MixedVariableSpec(
-            lower=self.lower.to(device=target_device, dtype=target_dtype),
-            upper=self.upper.to(device=target_device, dtype=target_dtype),
-            integer_mask=self.integer_mask.to(device=target_device),
-            categorical_mask=self.categorical_mask.to(device=target_device),
-            steps=self.steps.to(device=target_device, dtype=target_dtype),
-            fixed_mask=self.fixed_mask.to(device=target_device),
-            fixed_values=self.fixed_values.to(device=target_device, dtype=target_dtype),
-        )
 
 
 def repair_population(population: Tensor, spec: MixedVariableSpec) -> Tensor:
@@ -301,7 +241,3 @@ def repair_population(population: Tensor, spec: MixedVariableSpec) -> Tensor:
     if bool(spec.fixed_mask.any()):
         repaired[:, spec.fixed_mask] = spec.fixed_values[spec.fixed_mask]
     return repaired
-
-
-# A short spelling is convenient at integration call sites.
-repair = repair_population

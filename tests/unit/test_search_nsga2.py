@@ -11,9 +11,7 @@ from leanhebo.search import (
     crowding_distance,
     duplicate_mask,
     repair_population,
-    sobol_population,
 )
-from leanhebo.space import Bool, Categorical, Float, Integer, Space
 
 
 def _biobjective(values: torch.Tensor) -> torch.Tensor:
@@ -27,20 +25,18 @@ def _biobjective(values: torch.Tensor) -> torch.Tensor:
 
 
 def test_minimize_is_reproducible_from_a_torch_generator() -> None:
-    optimizer = TorchNSGA2(population_size=24, generations=8)
-    lower = torch.zeros(2)
-    upper = torch.ones(2)
+    optimizer = TorchNSGA2(
+        MixedVariableSpec(torch.zeros(2), torch.ones(2)),
+        population_size=24,
+        generations=8,
+    )
 
     first = optimizer.minimize(
         _biobjective,
-        lower,
-        upper,
         generator=torch.Generator().manual_seed(1234),
     )
     second = optimizer.minimize(
         _biobjective,
-        lower,
-        upper,
         generator=torch.Generator().manual_seed(1234),
     )
 
@@ -59,47 +55,18 @@ def test_minimize_is_reproducible_from_a_torch_generator() -> None:
     assert first.pareto_population.shape[0] > 1
 
 
-def test_compiled_space_metadata_adapter_preserves_coordinate_semantics() -> None:
-    compiled = Space(
-        Float("real", 0.0, 1.0),
-        Integer("stepped", 4, 12, step=4),
-        Integer("power", 1, 100, log=True),
-        Integer("exponent", 1, 8, base=2, exponent=True),
-        Categorical("category", ("a", "b", "c")),
-        Bool("flag"),
-    ).compile()
-    fixed = compiled.compile_fixed({"stepped": 8, "category": "b"})
-    spec = MixedVariableSpec.from_compiled_space(
-        compiled,
-        fixed_mask=compiled.fixed_mask(fixed),
-        fixed_values=compiled.dense_fixed_values(fixed),
-    )
-
-    population = sobol_population(
-        spec,
-        16,
-        generator=torch.Generator().manual_seed(31),
-    )
-
-    assert spec.integer_mask.tolist() == [False, True, False, True, False, False]
-    assert torch.equal(population[:, 1], torch.ones(16))  # coordinate 1 decodes to value 8
-    assert torch.equal(population[:, 4], torch.ones(16))  # category code for "b"
-    assert bool((population[:, 2] != population[:, 2].round()).any())  # power stays continuous
-
-
 def test_minimize_injects_incumbents_before_sobol_points() -> None:
     optimizer = TorchNSGA2(
+        MixedVariableSpec(torch.zeros(2), torch.ones(2)),
         population_size=8,
         generations=0,
-        eliminate_duplicates=True,
+        eliminate_duplicate_points=True,
     )
     incumbent = torch.tensor([0.25, 0.75])
 
     result = optimizer.minimize(
         _biobjective,
-        torch.zeros(2),
-        torch.ones(2),
-        incumbent=incumbent,
+        incumbents=incumbent,
         generator=torch.Generator().manual_seed(1),
     )
 
@@ -161,12 +128,14 @@ def test_combined_parent_offspring_pool_is_unique_before_survival(
         return original_survival(population, objectives, n_survive, **options)
 
     monkeypatch.setattr(nsga2_module, "elitist_survival", checked_survival)
-    optimizer = TorchNSGA2(population_size=24, generations=6)
+    optimizer = TorchNSGA2(
+        MixedVariableSpec(torch.zeros(2), torch.ones(2)),
+        population_size=24,
+        generations=6,
+    )
 
     optimizer.minimize(
         _biobjective,
-        torch.zeros(2),
-        torch.ones(2),
         generator=torch.Generator().manual_seed(317),
     )
 
@@ -191,20 +160,91 @@ def test_saturated_discrete_space_returns_all_available_unique_points() -> None:
     assert result.candidate_evaluations >= result.population.shape[0]
 
 
+def test_discrete_initialization_completes_after_repeated_sobol_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = MixedVariableSpec(
+        lower=torch.zeros(2),
+        upper=torch.full((2,), 3.0),
+        categorical_mask=torch.ones(2, dtype=torch.bool),
+    )
+
+    def repeated_lower(
+        self: nsga2_module._SobolPopulationSampler,
+        count: int,
+    ) -> torch.Tensor:
+        lower = self._spec.lower
+        return lower.expand(count, -1).clone()
+
+    monkeypatch.setattr(nsga2_module._SobolPopulationSampler, "draw", repeated_lower)
+    result = TorchNSGA2(
+        spec,
+        population_size=10,
+        generations=0,
+        max_duplicate_retries=0,
+    ).minimize(lambda population: population.sum(dim=1))
+
+    assert result.population.shape == (10, 2)
+    assert not bool(duplicate_mask(result.population).any())
+
+
+def test_discrete_offspring_completion_uses_unseen_lattice_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = MixedVariableSpec(
+        lower=torch.zeros(2),
+        upper=torch.full((2,), 3.0),
+        categorical_mask=torch.ones(2, dtype=torch.bool),
+    )
+    optimizer = TorchNSGA2(spec, population_size=4, max_duplicate_retries=0)
+    population = torch.tensor([[0.0, 0.0], [0.0, 1.0], [0.0, 2.0], [0.0, 3.0]])
+
+    def repeated_parent(
+        self: TorchNSGA2,
+        population: torch.Tensor,
+        ranks: torch.Tensor,
+        crowding: torch.Tensor,
+        spec: MixedVariableSpec,
+        count: int,
+        generator: torch.Generator | None,
+    ) -> torch.Tensor:
+        del self, ranks, crowding, spec, generator
+        return population[:1].expand(count, -1).clone()
+
+    monkeypatch.setattr(TorchNSGA2, "_offspring_batch", repeated_parent)
+    sampler = nsga2_module._SobolPopulationSampler(spec, None)
+    monkeypatch.setattr(
+        sampler,
+        "draw",
+        lambda count: population[:1].expand(count, -1).clone(),
+    )
+    offspring = optimizer._make_offspring(
+        population,
+        torch.zeros(4, dtype=torch.int64),
+        torch.zeros(4),
+        spec,
+        sampler,
+        None,
+    )
+
+    assert offspring.shape == population.shape
+    assert not bool(duplicate_mask(torch.cat((population, offspring))).any())
+
+
 def test_objective_shape_and_finite_values_are_checked() -> None:
-    optimizer = TorchNSGA2(population_size=4, generations=0)
+    optimizer = TorchNSGA2(
+        MixedVariableSpec(torch.zeros(1), torch.ones(1)),
+        population_size=4,
+        generations=0,
+    )
 
     with pytest.raises(ValueError, match="shape"):
         optimizer.minimize(
             lambda population: torch.ones(3, 2),
-            torch.zeros(1),
-            torch.ones(1),
         )
     with pytest.raises(ValueError, match="non-finite"):
         optimizer.minimize(
             lambda population: torch.full((population.shape[0], 1), torch.nan),
-            torch.zeros(1),
-            torch.ones(1),
         )
 
 
@@ -213,10 +253,12 @@ def test_objective_shape_and_finite_values_are_checked() -> None:
 def test_cuda_minimize_uses_cuda_generator_and_tensors() -> None:
     device = torch.device("cuda")
     generator = torch.Generator(device=device).manual_seed(29)
-    result = TorchNSGA2(population_size=16, generations=2).minimize(
-        _biobjective,
+    spec = MixedVariableSpec(
         torch.zeros(2, device=device),
         torch.ones(2, device=device),
+    )
+    result = TorchNSGA2(spec, population_size=16, generations=2).minimize(
+        _biobjective,
         generator=generator,
     )
 

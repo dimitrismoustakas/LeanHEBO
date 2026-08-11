@@ -255,7 +255,7 @@ def test_fixed_history_comparator_rejects_different_preloaded_data() -> None:
     candidate, baseline, key = _valid_comparison_pair()
 
     report = build_fixed_history_report({key: candidate}, {key: baseline})
-    assert report["comparison_lane"] == "matched-work"
+    assert report["work_matches"] is True
 
     baseline["metrics"]["history_sha256"] = "2" * 64
     with pytest.raises(ValueError, match="refusing fixed-history comparison"):
@@ -394,6 +394,7 @@ def _valid_comparison_pair() -> tuple[RawResult, RawResult, tuple[str, str, int]
             },
         },
         quality={"normalized_regret": None},
+        runtime={},
     ).to_dict()
     candidate = cast(RawResult, common)
     baseline = deepcopy(candidate)

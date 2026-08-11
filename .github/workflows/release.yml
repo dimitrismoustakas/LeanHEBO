@@ -42,6 +42,10 @@ jobs:
                   f"release tag {os.environ['RELEASE_TAG']!r} does not match {expected_tag!r}"
               )
           PY
+      - name: Install release test environment
+        run: uv sync --locked --all-groups --all-extras --python 3.13
+      - name: Run tests
+        run: uv run --locked pytest
       - name: Build wheel and source distribution
         run: uv build --no-sources
       - name: Validate distribution metadata

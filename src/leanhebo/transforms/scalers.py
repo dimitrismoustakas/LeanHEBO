@@ -24,31 +24,6 @@ def _require_float_batch(x: Tensor) -> None:
         raise ValueError("cannot fit a scaler with zero observations")
 
 
-def _finite_moments(x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """Return finite-only population mean, variance, and count per feature."""
-    finite = torch.isfinite(x)
-    count = finite.sum(dim=0)
-    safe_count = count.clamp_min(1)
-    zero = torch.zeros((), dtype=x.dtype, device=x.device)
-    values = torch.where(finite, x, zero)
-    mean = values.sum(dim=0) / safe_count
-    centered = torch.where(finite, x - mean, zero)
-    variance = centered.square().sum(dim=0) / safe_count
-    valid = count > 0
-    mean = torch.where(valid, mean, torch.zeros_like(mean))
-    variance = torch.where(valid, variance, torch.zeros_like(variance))
-    return mean, variance, count
-
-
-def _constant_mask(variance: Tensor, mean: Tensor, count: Tensor) -> Tensor:
-    """Detect constants without magnifying round-off in large-offset columns."""
-    eps = torch.finfo(variance.dtype).eps
-    count_as_float = count.to(dtype=variance.dtype)
-    upper_bound = count_as_float * eps * variance
-    upper_bound = upper_bound + (count_as_float * mean * eps).square()
-    return variance <= upper_bound
-
-
 class _ResizableBufferModule(nn.Module):
     """Allow feature-sized buffers to load into a newly constructed module."""
 
@@ -83,214 +58,54 @@ class _ResizableBufferModule(nn.Module):
 
 
 class IdentityScaler(nn.Module):
-    """A stateless scaler with the same interface as the fitted scalers."""
-
-    _anchor: Tensor
-    _scaler_version: Tensor
-
-    def __init__(self) -> None:
-        super().__init__()
-        # An empty buffer gives ``to(device, dtype)`` meaningful module semantics.
-        self.register_buffer("_anchor", torch.empty(0))
-        self.register_buffer("_scaler_version", torch.zeros((), dtype=torch.int64))
+    """No-op input scaling for spaces without continuous parameters."""
 
     @property
     def fitted(self) -> bool:
         """Identity scaling is always ready for use."""
         return True
 
-    @property
-    def version(self) -> int:
-        return int(self._scaler_version.item())
-
-    @property
-    def input_scaler_version(self) -> int:
-        return self.version
-
     def fit(self, x: Tensor) -> IdentityScaler:
         if not isinstance(x, Tensor):
             raise TypeError(f"expected a torch.Tensor, got {type(x).__name__}")
-        if x.is_floating_point():
-            self.to(device=x.device, dtype=x.dtype)
-            self._anchor = torch.empty(0, dtype=x.dtype, device=x.device)
-        else:
-            self.to(device=x.device)
-            self._anchor = torch.empty(0, device=x.device)
-        self._scaler_version.add_(1)
         return self
 
-    def forward(self, x: Tensor) -> Tensor:
-        return x
-
     def transform(self, x: Tensor) -> Tensor:
-        return self.forward(x)
-
-    def inverse_transform(self, x: Tensor) -> Tensor:
         return x
-
-
-class TorchStandardScaler(_ResizableBufferModule):
-    """Feature-wise population standardization using finite observations only.
-
-    Nonfinite entries are ignored while fitting and naturally remain nonfinite when
-    transformed. Constant columns use a scale of one, matching scikit-learn's
-    convention. A column with no finite observations uses mean zero and scale one.
-    """
-
-    _resizable_buffers = ("mean_", "var_", "scale_", "finite_count_")
-    mean_: Tensor
-    var_: Tensor
-    scale_: Tensor
-    finite_count_: Tensor
-    _scaler_version: Tensor
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.register_buffer("mean_", torch.empty(0))
-        self.register_buffer("var_", torch.empty(0))
-        self.register_buffer("scale_", torch.empty(0))
-        self.register_buffer("finite_count_", torch.empty(0, dtype=torch.int64))
-        self.register_buffer("_scaler_version", torch.zeros((), dtype=torch.int64))
-
-    @property
-    def fitted(self) -> bool:
-        return self.mean_.numel() > 0
-
-    @property
-    def n_features_in_(self) -> int:
-        self._require_fitted()
-        return self.mean_.numel()
-
-    @property
-    def version(self) -> int:
-        return int(self._scaler_version.item())
-
-    @property
-    def input_scaler_version(self) -> int:
-        return self.version
-
-    @property
-    def mean(self) -> Tensor:
-        """Compatibility alias for the fitted mean buffer."""
-        return self.mean_
-
-    @property
-    def std(self) -> Tensor:
-        """Compatibility alias for the fitted scale buffer."""
-        return self.scale_
-
-    def _require_fitted(self) -> None:
-        if not self.fitted:
-            raise RuntimeError("TorchStandardScaler must be fitted before use")
-
-    def _check_features(self, x: Tensor) -> None:
-        self._require_fitted()
-        if x.ndim == 0 or x.shape[-1] != self.n_features_in_:
-            raise ValueError(
-                f"expected last dimension {self.n_features_in_}, got shape {tuple(x.shape)}"
-            )
-
-    @torch.no_grad()
-    def fit(self, x: Tensor) -> TorchStandardScaler:
-        _require_float_batch(x)
-        self.to(device=x.device, dtype=x.dtype)
-        mean, variance, count = _finite_moments(x.detach())
-        constant = _constant_mask(variance, mean, count) | (count == 0)
-        scale = torch.sqrt(variance)
-        scale = torch.where(constant, torch.ones_like(scale), scale)
-
-        self.mean_ = mean
-        self.var_ = variance
-        self.scale_ = scale
-        self.finite_count_ = count
-        self._scaler_version.add_(1)
-        return self
-
-    def forward(self, x: Tensor) -> Tensor:
-        self._check_features(x)
-        return (x - self.mean_) / self.scale_
-
-    def transform(self, x: Tensor) -> Tensor:
-        return self.forward(x)
-
-    def inverse_transform(self, x: Tensor) -> Tensor:
-        self._check_features(x)
-        return x * self.scale_ + self.mean_
 
 
 class TorchMinMaxScaler(_ResizableBufferModule):
     """Map each finite feature to a configurable closed interval."""
 
     _resizable_buffers = (
-        "_feature_range",
         "data_min_",
         "data_max_",
-        "data_range_",
         "scale_",
         "min_",
-        "finite_count_",
     )
-    _feature_range: Tensor
     data_min_: Tensor
     data_max_: Tensor
-    data_range_: Tensor
     scale_: Tensor
     min_: Tensor
-    finite_count_: Tensor
-    _scaler_version: Tensor
 
     def __init__(
         self,
         feature_range: tuple[float, float] = (0.0, 1.0),
-        *,
-        range: tuple[float, float] | None = None,
     ) -> None:
         super().__init__()
-        if range is not None:
-            if feature_range != (0.0, 1.0):
-                raise ValueError("pass either feature_range or range, not both")
-            feature_range = range
         lower, upper = float(feature_range[0]), float(feature_range[1])
         if not lower < upper:
             raise ValueError("feature_range upper bound must be greater than its lower bound")
 
-        self.register_buffer("_feature_range", torch.tensor([lower, upper]))
+        self._feature_range = (lower, upper)
         self.register_buffer("data_min_", torch.empty(0))
         self.register_buffer("data_max_", torch.empty(0))
-        self.register_buffer("data_range_", torch.empty(0))
         self.register_buffer("scale_", torch.empty(0))
         self.register_buffer("min_", torch.empty(0))
-        self.register_buffer("finite_count_", torch.empty(0, dtype=torch.int64))
-        self.register_buffer("_scaler_version", torch.zeros((), dtype=torch.int64))
 
     @property
     def fitted(self) -> bool:
         return self.data_min_.numel() > 0
-
-    @property
-    def n_features_in_(self) -> int:
-        self._require_fitted()
-        return self.data_min_.numel()
-
-    @property
-    def version(self) -> int:
-        return int(self._scaler_version.item())
-
-    @property
-    def input_scaler_version(self) -> int:
-        return self.version
-
-    @property
-    def feature_range(self) -> tuple[float, float]:
-        return (float(self._feature_range[0].item()), float(self._feature_range[1].item()))
-
-    @property
-    def range_lb(self) -> float:
-        return self.feature_range[0]
-
-    @property
-    def range_ub(self) -> float:
-        return self.feature_range[1]
 
     def _require_fitted(self) -> None:
         if not self.fitted:
@@ -298,10 +113,9 @@ class TorchMinMaxScaler(_ResizableBufferModule):
 
     def _check_features(self, x: Tensor) -> None:
         self._require_fitted()
-        if x.ndim == 0 or x.shape[-1] != self.n_features_in_:
-            raise ValueError(
-                f"expected last dimension {self.n_features_in_}, got shape {tuple(x.shape)}"
-            )
+        features = self.data_min_.numel()
+        if x.ndim == 0 or x.shape[-1] != features:
+            raise ValueError(f"expected last dimension {features}, got shape {tuple(x.shape)}")
 
     @torch.no_grad()
     def fit(self, x: Tensor) -> TorchMinMaxScaler:
@@ -319,7 +133,7 @@ class TorchMinMaxScaler(_ResizableBufferModule):
         data_max = torch.where(valid, data_max, torch.zeros_like(data_max))
         data_range = data_max - data_min
 
-        lower, upper = self._feature_range.unbind()
+        lower, upper = self._feature_range
         near_constant = data_range.abs() <= (10 * torch.finfo(x.dtype).eps)
         denominator = torch.where(near_constant, torch.ones_like(data_range), data_range)
         scale = (upper - lower) / denominator
@@ -331,32 +145,16 @@ class TorchMinMaxScaler(_ResizableBufferModule):
 
         self.data_min_ = data_min
         self.data_max_ = data_max
-        self.data_range_ = data_range
         self.scale_ = scale
         self.min_ = offset
-        self.finite_count_ = count
-        self._scaler_version.add_(1)
         return self
 
-    def forward(self, x: Tensor) -> Tensor:
+    def transform(self, x: Tensor) -> Tensor:
         self._check_features(x)
         return x * self.scale_ + self.min_
-
-    def transform(self, x: Tensor) -> Tensor:
-        return self.forward(x)
-
-    def inverse_transform(self, x: Tensor) -> Tensor:
-        self._check_features(x)
-        return (x - self.min_) / self.scale_
-
-
-# HEBO historically exported this longer name. Keep it as a zero-cost alias.
-TorchIdentityScaler = IdentityScaler
 
 
 __all__ = [
     "IdentityScaler",
-    "TorchIdentityScaler",
     "TorchMinMaxScaler",
-    "TorchStandardScaler",
 ]

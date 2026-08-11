@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from leanhebo.data import CandidateBatch, EncodedBatch
-from leanhebo.space import Bool, Categorical, DenseKind, Float, Integer, Space
+from leanhebo.space import Bool, Categorical, Float, Integer, Space
 
 
 def mixed_space() -> Space:
@@ -26,7 +26,7 @@ def mixed_space() -> Space:
 
 def test_parameter_validation_and_transform_modes() -> None:
     assert Integer("x", 4, 16, step=4).optimization_bounds == (0.0, 3.0)
-    assert Integer("x", 1, 100, power=True).mode == "power"
+    assert Integer("x", 1, 100, log=True).mode == "power"
     assert Integer("x", 32, 1024, base=2, exponent=True).optimization_bounds == (
         5.0,
         10.0,
@@ -105,48 +105,8 @@ def test_numpy_pandas_and_polars_adapters() -> None:
     assert compiled.decode(compiled.encode(polars_frame)).to_records() == candidates.to_records()
 
 
-def test_compiled_metadata_and_dense_bridge() -> None:
+def test_dense_bridge_repairs_every_variable_kind() -> None:
     compiled = mixed_space().compile()
-    assert compiled.dense_names == (
-        "learning_rate",
-        "depth",
-        "width",
-        "workers",
-        "batch_size",
-        "activation",
-        "use_bias",
-    )
-    assert compiled.dense_kind_codes.tolist() == [
-        DenseKind.FLOAT,
-        DenseKind.INTEGER,
-        DenseKind.STEPPED_INTEGER,
-        DenseKind.POWER_INTEGER,
-        DenseKind.EXPONENT_INTEGER,
-        DenseKind.CATEGORICAL,
-        DenseKind.BOOLEAN,
-    ]
-    assert compiled.real_mask.tolist() == [True, False, False, False, False, False, False]
-    assert compiled.integer_mask.tolist() == [False, True, True, True, True, False, False]
-    assert compiled.categorical_mask.tolist() == [False, False, False, False, False, True, True]
-    assert compiled.search_integer_mask.tolist() == [
-        False,
-        True,
-        True,
-        False,
-        True,
-        False,
-        False,
-    ]
-    assert compiled.search_continuous_mask.tolist() == [
-        True,
-        False,
-        False,
-        True,
-        False,
-        False,
-        False,
-    ]
-
     raw = torch.tensor(
         [[-20.0, 3.4, 1.6, math.log10(4.3), 7.6, 9.0, -2.0]],
         dtype=torch.float32,
@@ -168,13 +128,8 @@ def test_public_column_order_is_independent_of_dense_tensor_order() -> None:
         Integer("n", 1, 3),
     ).compile()
     assert compiled.names == ("category", "x", "flag", "n")
-    assert compiled.dense_names == ("x", "n", "category", "flag")
-    assert compiled.public_to_dense_indices.tolist() == [2, 0, 3, 1]
-    assert compiled.dense_to_public_indices.tolist() == [1, 3, 0, 2]
     record = {"category": "b", "x": 0.25, "flag": True, "n": 2}
     assert compiled.decode(compiled.encode([record])).to_records() == [record]
-    assert compiled.category_to_code["category"]["b"] == 1
-    assert compiled.code_to_category["flag"] == (False, True)
 
 
 def test_sobol_sampling_is_deterministic_and_fixed_values_are_exact() -> None:
@@ -187,35 +142,11 @@ def test_sobol_sampling_is_deterministic_and_fixed_values_are_exact() -> None:
 
     assert torch.equal(first.continuous, second.continuous)
     assert torch.equal(first.categorical, second.categorical)
-    assert compiled.fixed_mask(fixed).tolist() == [True, True, False, False, False, True, True]
-    dense_fixed = compiled.dense_fixed_values(fixed)
-    assert dense_fixed[compiled.fixed_mask(fixed)].tolist() == pytest.approx(
-        [-2.5228787452803374, 11.0, 2.0, 1.0]
-    )
     for record in first.to_records():
         assert record["learning_rate"] == 0.003
         assert record["depth"] == 11
         assert record["activation"] == "silu"
         assert record["use_bias"] is True
-
-
-def test_dense_repair_and_encoding_can_be_fused_without_changing_values() -> None:
-    compiled = mixed_space().compile()
-    fixed = compiled.compile_fixed({"width": 12, "activation": "gelu"})
-    raw = (
-        torch.randn(
-            (37, compiled.dense_dimension),
-            generator=torch.Generator().manual_seed(23),
-        )
-        * 20
-    )
-
-    repaired = compiled.repair_dense(raw, fixed=fixed)
-    separate = compiled.encoded_from_dense(repaired, repair=False, fixed=fixed)
-    fused = compiled.encoded_from_dense(raw, repair=True, fixed=fixed)
-
-    assert torch.equal(fused.continuous, separate.continuous)
-    assert torch.equal(fused.categorical, separate.categorical)
 
 
 def test_schema_spec_round_trip_has_stable_fingerprint() -> None:

@@ -47,6 +47,8 @@ jobs:
       - name: Type check against minimum Python
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
         run: uv run --locked mypy src/leanhebo benchmarks
-      - run: uv run --locked pytest --cov=leanhebo --cov-report=xml
-      - run: uv run --locked pytest benchmarks/tests benchmarks/micro/benchmark_matched_search.py
+      - run: uv run --locked pytest
+      - name: Test benchmark harness
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
+        run: uv run --locked pytest benchmarks/tests
       - run: uv build --no-sources

@@ -4,14 +4,11 @@
 
 from __future__ import annotations
 
-import math
-import platform
 import time
 from collections import Counter, defaultdict
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
-from typing import Any
+from dataclasses import dataclass, field
 
 import torch
 
@@ -63,72 +60,3 @@ class Diagnostics:
 
     def add_fit_report(self, report: FitReport) -> None:
         self.fit_reports.append(report)
-
-    def effective_runtime(self) -> dict[str, Any]:
-        result: dict[str, Any] = {
-            "device": self.runtime.device,
-            "dtype": self.runtime.dtype,
-            "torch_version": torch.__version__,
-            "python_version": platform.python_version(),
-            "torch_num_threads": torch.get_num_threads(),
-            "torch_num_interop_threads": torch.get_num_interop_threads(),
-            "cuda_available": torch.cuda.is_available(),
-        }
-        if self.runtime.device.startswith("cuda") and torch.cuda.is_available():
-            device = torch.device(self.runtime.device)
-            result["cuda_device_name"] = torch.cuda.get_device_name(device)
-        return result
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "phase_seconds": dict(self.phase_seconds),
-            "counters": dict(self.counters),
-            "fit_reports": [asdict(report) for report in self.fit_reports],
-            "effective_runtime": self.effective_runtime(),
-        }
-
-    def state_dict(self) -> dict[str, Any]:
-        """Return checkpoint-safe accumulated diagnostics without live runtime metadata."""
-
-        return {
-            "schema_version": 1,
-            "phase_seconds": {name: list(samples) for name, samples in self.phase_seconds.items()},
-            "counters": dict(self.counters),
-            "fit_reports": [asdict(report) for report in self.fit_reports],
-        }
-
-    def load_state_dict(self, state: Mapping[str, Any]) -> None:
-        """Restore validated counters, timings, and fit reports."""
-
-        if int(state.get("schema_version", -1)) != 1:
-            raise ValueError("unsupported diagnostics state schema")
-        phases = state.get("phase_seconds")
-        counters = state.get("counters")
-        reports = state.get("fit_reports")
-        if (
-            not isinstance(phases, Mapping)
-            or not isinstance(counters, Mapping)
-            or not isinstance(reports, list)
-        ):
-            raise TypeError("diagnostics state is malformed")
-        restored_phases: defaultdict[str, list[float]] = defaultdict(list)
-        for name, samples in phases.items():
-            if not isinstance(name, str) or not isinstance(samples, list):
-                raise TypeError("diagnostic phase state is malformed")
-            values = [float(sample) for sample in samples]
-            if any(not math.isfinite(value) or value < 0 for value in values):
-                raise ValueError("diagnostic phase durations must be finite and non-negative")
-            restored_phases[name] = values
-        restored_counters: Counter[str] = Counter()
-        for name, value in counters.items():
-            if not isinstance(name, str) or isinstance(value, bool) or not isinstance(value, int):
-                raise TypeError("diagnostic counters must map strings to integers")
-            restored_counters[name] = value
-        restored_reports = []
-        for report in reports:
-            if not isinstance(report, Mapping):
-                raise TypeError("diagnostic fit report state is malformed")
-            restored_reports.append(FitReport(**dict(report)))
-        self.phase_seconds = restored_phases
-        self.counters = restored_counters
-        self.fit_reports = restored_reports

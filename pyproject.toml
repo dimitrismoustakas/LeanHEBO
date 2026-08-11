@@ -1,7 +1,7 @@
 [project]
 name = "leanhebo"
-version = "0.1.0"
-description = "A tensor-native, low-latency implementation of the HEBO method"
+version = "0.2.0"
+description = "A Torch-backed implementation of HEBO's single-objective exact-GP optimizer"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -27,7 +27,6 @@ dependencies = [
 Homepage = "https://github.com/dimitrismoustakas/LeanHEBO"
 Repository = "https://github.com/dimitrismoustakas/LeanHEBO"
 Issues = "https://github.com/dimitrismoustakas/LeanHEBO/issues"
-Changelog = "https://github.com/dimitrismoustakas/LeanHEBO/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 pandas = ["pandas>=2.2"]
@@ -39,19 +38,11 @@ dev = [
     "mypy>=1.11",
     "pandas>=2.2",
     "polars>=1.0",
-    "pre-commit>=3.7",
     "pymoo>=0.6",
     "pytest>=8",
-    "pytest-cov>=5",
     "ruff>=0.6",
     "scikit-learn>=1.5",
     "scipy>=1.14",
-]
-bench = [
-    "asv>=0.6",
-    "psutil>=6",
-    "py-spy>=0.4",
-    "pytest-benchmark>=4",
 ]
 
 [build-system]
@@ -62,9 +53,7 @@ build-backend = "uv_build"
 module-name = "leanhebo"
 module-root = "src"
 source-include = [
-    "CHANGELOG.md",
     "CITATION.cff",
-    "ORIGIN.md",
     "examples/**",
 ]
 
@@ -73,16 +62,7 @@ addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
 markers = [
     "gpu: requires a CUDA-capable Torch installation",
-    "performance: structural or timing performance tests",
 ]
-
-[tool.coverage.run]
-branch = true
-source = ["leanhebo"]
-
-[tool.coverage.report]
-show_missing = true
-skip_covered = true
 
 [tool.ruff]
 line-length = 100

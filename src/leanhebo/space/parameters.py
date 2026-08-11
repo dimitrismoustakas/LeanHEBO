@@ -114,14 +114,6 @@ class Float(Parameter):
         object.__setattr__(self, "base", base)
 
     @property
-    def lb(self) -> float:
-        return self.low
-
-    @property
-    def ub(self) -> float:
-        return self.high
-
-    @property
     def is_categorical(self) -> bool:
         return False
 
@@ -173,9 +165,6 @@ class Integer(Parameter):
     arbitrary integers are optimized in logarithmic coordinates.  Setting
     ``exponent=True`` restricts the domain to integral powers of ``base`` and
     implements HEBO's ``int_exponent`` behavior.
-
-    ``power`` is accepted as a spelling alias for ``log`` for callers migrating
-    from configuration-oriented APIs.
     """
 
     low: int
@@ -184,7 +173,6 @@ class Integer(Parameter):
     log: bool = False
     base: float = 10.0
     exponent: bool = False
-    power: bool | None = None
     type_name: ClassVar[str] = "integer"
 
     def __post_init__(self) -> None:
@@ -194,10 +182,6 @@ class Integer(Parameter):
         step = _as_integer(self.step, parameter=f"{self.name}.step")
         base = _as_finite_float(self.base, parameter=f"{self.name}.base")
         log = self.log
-        if self.power is not None:
-            if self.log and not self.power:
-                raise ValueError("log=True conflicts with power=False")
-            log = self.power
         if low > high:
             raise ValueError(f"{self.name!r} requires low <= high")
         if step <= 0:
@@ -224,15 +208,6 @@ class Integer(Parameter):
         object.__setattr__(self, "step", step)
         object.__setattr__(self, "base", base)
         object.__setattr__(self, "log", log)
-        object.__setattr__(self, "power", None)
-
-    @property
-    def lb(self) -> int:
-        return self.low
-
-    @property
-    def ub(self) -> int:
-        return self.high
 
     @property
     def is_categorical(self) -> bool:
@@ -373,10 +348,6 @@ class Categorical(Parameter):
     def optimization_bounds(self) -> tuple[float, float]:
         return 0.0, float(len(self.categories) - 1)
 
-    @property
-    def num_categories(self) -> int:
-        return len(self.categories)
-
     def _code(self, value: object) -> int:
         try:
             code = self._category_to_code.get(cast(Primitive, value))
@@ -453,35 +424,13 @@ def parameter_from_spec(spec: dict[str, Any]) -> ParameterLike:
         name = str(item.pop("name"))
     except KeyError as error:
         raise ValueError(f"missing parameter-spec field: {error.args[0]}") from error
-    aliases = {
-        "num": "float",
-        "pow": "float",
-        "int": "integer",
-        "step_int": "integer",
-        "pow_int": "integer",
-        "int_exponent": "integer",
-        "cat": "categorical",
-    }
-    normalized = aliases.get(type_name, type_name)
-    if type_name == "pow":
-        item.setdefault("log", True)
-    elif type_name == "step_int":
-        pass
-    elif type_name == "pow_int":
-        item.setdefault("log", True)
-    elif type_name == "int_exponent":
-        item.setdefault("exponent", True)
-    if "lb" in item:
-        item.setdefault("low", item.pop("lb"))
-    if "ub" in item:
-        item.setdefault("high", item.pop("ub"))
-    if normalized == "float":
+    if type_name == "float":
         return Float(name, **item)
-    if normalized == "integer":
+    if type_name == "integer":
         return Integer(name, **item)
-    if normalized == "categorical":
+    if type_name == "categorical":
         return Categorical(name, **item)
-    if normalized == "bool":
+    if type_name == "bool":
         if item:
             raise ValueError(f"unexpected Boolean parameter fields: {sorted(item)}")
         return Bool(name)

@@ -64,6 +64,17 @@ def _exact_duplicate_mask(population: Tensor, existing: Tensor | None) -> Tensor
             mask.fill_(True)
         return mask
 
+    if population.device.type == "cpu":
+        seen: set[tuple[float, ...]] = set()
+        if existing is not None:
+            seen.update(tuple(row) for row in existing.tolist())
+        duplicates: list[bool] = []
+        for row in population.tolist():
+            key = tuple(row)
+            duplicates.append(key in seen)
+            seen.add(key)
+        return torch.tensor(duplicates, dtype=torch.bool, device=population.device)
+
     if existing is None or existing.shape[0] == 0:
         combined = population
         offset = 0
@@ -222,7 +233,3 @@ def _eliminate_canonical_duplicates(
         atol=atol,
     )
     return population[keep]
-
-
-# Readable alias for callers that only need the Boolean mask.
-canonical_duplicate_mask = duplicate_mask

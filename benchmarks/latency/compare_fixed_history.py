@@ -37,7 +37,7 @@ def build_fixed_history_report(
     candidate_results: Mapping[PairKey, RawResult],
     baseline_results: Mapping[PairKey, RawResult],
 ) -> dict[str, object]:
-    """Build a strict matched-work report after checking fixed-history identity."""
+    """Compare timing only after checking fixed-history identity and declared work."""
 
     candidate_keys = set(candidate_results)
     baseline_keys = set(baseline_results)

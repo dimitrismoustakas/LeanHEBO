@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -24,7 +24,6 @@ from leanhebo.search.sorting import crowding_distance, non_dominated_sort
 from leanhebo.search.survival import elitist_survival
 
 Objective = Callable[[Tensor], Tensor]
-TensorLike = Tensor | Sequence[float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,34 +45,10 @@ class NSGA2Result:
         return self.ranks == 0
 
     @property
-    def pareto_indices(self) -> Tensor:
-        """Indices of the rank-zero front."""
-
-        return torch.nonzero(self.pareto_mask, as_tuple=False).flatten()
-
-    @property
     def pareto_population(self) -> Tensor:
         """Decision vectors on the rank-zero front."""
 
         return self.population[self.pareto_mask]
-
-    @property
-    def pareto_objectives(self) -> Tensor:
-        """Objective vectors on the rank-zero front."""
-
-        return self.objectives[self.pareto_mask]
-
-    @property
-    def x(self) -> Tensor:
-        """Short compatibility alias for the final population."""
-
-        return self.population
-
-    @property
-    def f(self) -> Tensor:
-        """Short compatibility alias for the final objectives."""
-
-        return self.objectives
 
 
 class _SobolPopulationSampler:
@@ -133,40 +108,76 @@ class _SobolPopulationSampler:
         return repair_population(population, self._spec)
 
 
-def sobol_population(
+def _discrete_lattice_completion(
     spec: MixedVariableSpec,
-    population_size: int,
+    count: int,
     *,
-    generator: torch.Generator | None = None,
+    existing: Tensor,
+    atol: float,
 ) -> Tensor:
-    """Draw and repair a mixed-variable Sobol population.
+    """Enumerate deterministic unseen rows for a fully discrete search lattice."""
 
-    A generator controls the scramble seed and must live on the same device as ``spec``. The Sobol
-    engine itself is CPU-based; CUDA receives only the completed dense unit-cube draw.
-    """
+    if count <= 0 or not bool((spec.integer_mask | spec.categorical_mask | spec.fixed_mask).all()):
+        return spec.lower.new_empty((0, spec.dimension))
 
-    if population_size < 0:
-        raise ValueError("population_size must be non-negative")
-    _validate_generator(generator, spec.lower.device)
-    return _SobolPopulationSampler(spec, generator).draw(population_size)
+    cardinalities: list[int] = []
+    for dimension in range(spec.dimension):
+        if bool(spec.fixed_mask[dimension]):
+            cardinalities.append(1)
+        elif bool(spec.integer_mask[dimension]):
+            span = (spec.upper[dimension] - spec.lower[dimension]) / spec.steps[dimension]
+            cardinalities.append(math.floor(float(span.item())) + 1)
+        else:
+            span = spec.upper[dimension] - spec.lower[dimension]
+            cardinalities.append(round(float(span.item())) + 1)
 
-
-# Explicit alternative spelling for discoverability.
-initialize_sobol_population = sobol_population
+    total = math.prod(cardinalities)
+    completed = spec.lower.new_empty((0, spec.dimension))
+    chunk_size = max(64, min(4096, count * 4))
+    for start in range(0, total, chunk_size):
+        stop = min(start + chunk_size, total)
+        ordinals = torch.arange(
+            start,
+            stop,
+            dtype=torch.int64,
+            device=spec.lower.device,
+        )
+        remainder = ordinals
+        candidates = spec.lower.expand(stop - start, -1).clone()
+        for dimension in range(spec.dimension - 1, -1, -1):
+            cardinality = cardinalities[dimension]
+            codes = remainder.remainder(cardinality)
+            remainder = torch.div(remainder, cardinality, rounding_mode="floor")
+            if bool(spec.fixed_mask[dimension]):
+                candidates[:, dimension] = spec.fixed_values[dimension]
+            elif bool(spec.integer_mask[dimension]):
+                candidates[:, dimension] += codes.to(spec.lower.dtype) * spec.steps[dimension]
+            else:
+                candidates[:, dimension] += codes.to(spec.lower.dtype)
+        candidates = repair_population(candidates, spec)
+        candidates = _eliminate_canonical_duplicates(
+            candidates,
+            existing=torch.cat((existing, completed), dim=0),
+            spec=spec,
+            atol=atol,
+        )
+        completed = torch.cat((completed, candidates[: count - completed.shape[0]]), dim=0)
+        if completed.shape[0] == count:
+            break
+    return completed
 
 
 class TorchNSGA2:
     """Fixed-generation NSGA-II over a dense mixed-variable Torch population.
 
     The objective must accept a tensor shaped ``[n, d]`` and return minimization values shaped
-    ``[n, m]`` (or ``[n]`` for a single objective). Bounds or a :class:`MixedVariableSpec` can be
-    supplied once to the constructor or to each :meth:`minimize` call. No NumPy or tabular objects
-    enter the evolutionary loop.
+    ``[n, m]`` (or ``[n]`` for a single objective). No NumPy or tabular objects enter the
+    evolutionary loop.
     """
 
     def __init__(
         self,
-        space: MixedVariableSpec | None = None,
+        space: MixedVariableSpec,
         *,
         population_size: int = 100,
         generations: int = 100,
@@ -177,32 +188,10 @@ class TorchNSGA2:
         mutation_eta: float = 20.0,
         tournament_size: int = 2,
         eliminate_duplicate_points: bool = True,
-        eliminate_duplicates: bool | None = None,
         duplicate_tolerance: float = 0.0,
         max_duplicate_retries: int = 4,
-        pop_size: int | None = None,
-        n_generations: int | None = None,
     ) -> None:
-        """Configure search work and operators.
-
-        ``pop_size`` and ``n_generations`` are accepted as familiar NSGA-II aliases. The explicit
-        ``population_size`` and ``generations`` spellings are preferred.
-        """
-
-        if pop_size is not None:
-            if population_size != 100:
-                raise ValueError("specify only one of population_size and pop_size")
-            population_size = pop_size
-        if n_generations is not None:
-            if generations != 100:
-                raise ValueError("specify only one of generations and n_generations")
-            generations = n_generations
-        if eliminate_duplicates is not None:
-            if eliminate_duplicate_points is not True:
-                raise ValueError(
-                    "specify only one of eliminate_duplicate_points and eliminate_duplicates"
-                )
-            eliminate_duplicate_points = eliminate_duplicates
+        """Configure search work and operators."""
         if (
             isinstance(population_size, bool)
             or not isinstance(population_size, int)
@@ -240,7 +229,7 @@ class TorchNSGA2:
         ):
             raise ValueError("max_duplicate_retries must be non-negative")
 
-        self.space = space
+        self._spec = space
         self.population_size = population_size
         self.generations = generations
         self.crossover_probability = crossover_probability
@@ -252,61 +241,6 @@ class TorchNSGA2:
         self.eliminate_duplicate_points = eliminate_duplicate_points
         self.duplicate_tolerance = duplicate_tolerance
         self.max_duplicate_retries = max_duplicate_retries
-
-    def _resolve_space(
-        self,
-        lower: TensorLike | MixedVariableSpec | None,
-        upper: TensorLike | None,
-        *,
-        space: MixedVariableSpec | None,
-        integer_mask: Tensor | None,
-        categorical_mask: Tensor | None,
-        steps: Tensor | None,
-        fixed_mask: Tensor | None,
-        fixed_values: Tensor | None,
-        device: torch.device | str | None,
-        dtype: torch.dtype | None,
-    ) -> MixedVariableSpec:
-        candidates = [
-            space is not None,
-            isinstance(lower, MixedVariableSpec),
-            self.space is not None,
-        ]
-        if sum(candidates) > 1:
-            raise ValueError("provide a search specification in only one place")
-        if space is not None:
-            resolved = space
-        elif isinstance(lower, MixedVariableSpec):
-            if upper is not None:
-                raise ValueError("upper must be omitted when lower is a MixedVariableSpec")
-            resolved = lower
-        elif self.space is not None:
-            if lower is not None or upper is not None:
-                raise ValueError("bounds cannot override the constructor search specification")
-            resolved = self.space
-        else:
-            if lower is None or upper is None:
-                raise ValueError(
-                    "provide either a MixedVariableSpec or both lower and upper bounds"
-                )
-            if device is None and isinstance(lower, Tensor):
-                target_device = lower.device
-            else:
-                target_device = torch.device("cpu") if device is None else torch.device(device)
-            if dtype is None and isinstance(lower, Tensor) and lower.is_floating_point():
-                target_dtype = lower.dtype
-            else:
-                target_dtype = torch.get_default_dtype() if dtype is None else dtype
-            resolved = MixedVariableSpec(
-                lower=torch.as_tensor(lower, device=target_device, dtype=target_dtype),
-                upper=torch.as_tensor(upper, device=target_device, dtype=target_dtype),
-                integer_mask=integer_mask,
-                categorical_mask=categorical_mask,
-                steps=steps,
-                fixed_mask=fixed_mask,
-                fixed_values=fixed_values,
-            )
-        return resolved.to(device=device, dtype=dtype)
 
     @staticmethod
     def _as_seed_population(
@@ -369,6 +303,14 @@ class TorchNSGA2:
             attempts += 1
             if attempts > self.max_duplicate_retries and population.shape[0] < self.population_size:
                 break
+        if self.eliminate_duplicate_points and population.shape[0] < self.population_size:
+            completion = _discrete_lattice_completion(
+                spec,
+                self.population_size - population.shape[0],
+                existing=population,
+                atol=self.duplicate_tolerance,
+            )
+            population = torch.cat((population, completion), dim=0)
         if population.shape[0] == 0:  # A positive Sobol draw always yields at least one row.
             raise RuntimeError("failed to initialize a non-empty population")
         return population
@@ -481,9 +423,8 @@ class TorchNSGA2:
 
         remaining = target - offspring.shape[0]
         if remaining > 0:
-            # Saturated discrete spaces can make variation repeatedly reproduce a parent. A Sobol
-            # refill preserves dense execution and either finds unseen canonical points or proves
-            # (within the configured retries) that the available population is exhausted.
+            # Give variation one diverse Sobol refill before the exact discrete-lattice completion
+            # below. Spaces with a continuous axis remain best-effort because they are not finite.
             candidates = sampler.draw(max(remaining * 2, 4))
             candidates = _eliminate_canonical_duplicates(
                 candidates,
@@ -492,45 +433,28 @@ class TorchNSGA2:
                 atol=self.duplicate_tolerance,
             )
             offspring = torch.cat((offspring, candidates[:remaining]), dim=0)
+        remaining = target - offspring.shape[0]
+        if remaining > 0:
+            completion = _discrete_lattice_completion(
+                spec,
+                remaining,
+                existing=torch.cat((population, offspring), dim=0),
+                atol=self.duplicate_tolerance,
+            )
+            offspring = torch.cat((offspring, completion), dim=0)
         return offspring
 
     def minimize(
         self,
         objective: Objective,
-        lower: TensorLike | MixedVariableSpec | None = None,
-        upper: TensorLike | None = None,
         *,
-        space: MixedVariableSpec | None = None,
-        integer_mask: Tensor | None = None,
-        categorical_mask: Tensor | None = None,
-        steps: Tensor | None = None,
-        fixed_mask: Tensor | None = None,
-        fixed_values: Tensor | None = None,
-        incumbent: Tensor | None = None,
         incumbents: Tensor | None = None,
         initial_population: Tensor | None = None,
         generator: torch.Generator | None = None,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype | None = None,
     ) -> NSGA2Result:
         """Minimize a batched Torch objective for the configured number of generations."""
 
-        if incumbent is not None:
-            if incumbents is not None:
-                raise ValueError("specify only one of incumbent and incumbents")
-            incumbents = incumbent
-        spec = self._resolve_space(
-            lower,
-            upper,
-            space=space,
-            integer_mask=integer_mask,
-            categorical_mask=categorical_mask,
-            steps=steps,
-            fixed_mask=fixed_mask,
-            fixed_values=fixed_values,
-            device=device,
-            dtype=dtype,
-        )
+        spec = self._spec
         _validate_generator(generator, spec.lower.device)
         sampler = _SobolPopulationSampler(spec, generator)
         population = self._initialize(
@@ -570,13 +494,10 @@ class TorchNSGA2:
                 combined_population,
                 combined_objectives,
                 population.shape[0],
-                spec=spec,
                 # The initial population is unique, survivors remain a subset, and
                 # ``_make_offspring`` removes matches both within the batch and against the
                 # parents. Rechecking this invariant here only repeats quadratic row work.
                 eliminate_duplicate_points=False,
-                duplicate_tolerance=self.duplicate_tolerance,
-                _population_is_canonical=True,
             )
             population = survival.population
             objectives = survival.objectives

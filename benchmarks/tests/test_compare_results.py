@@ -60,6 +60,7 @@ def _result(*, name: str, seed: int, seconds: float, work: WorkBudget, regret: f
         },
         metrics={"duplicate_suggestions": seed},
         quality={"normalized_regret": regret},
+        runtime={},
     )
     return cast(RawResult, result.to_dict())
 
@@ -103,7 +104,7 @@ def test_matched_report_pairs_seeds_and_separates_suggestion_phases() -> None:
 
     report = build_comparison_report(candidate, baseline)
 
-    assert report["comparison_lane"] == "matched-work"
+    assert report["work_matches"] is True
     case = cast(
         dict[str, object], cast(dict[str, object], report["cases"])["toy-quality/sphere-2d"]
     )
@@ -118,7 +119,7 @@ def test_matched_report_pairs_seeds_and_separates_suggestion_phases() -> None:
     candidate_summary = cast(dict[str, object], case["candidate"])
     assert candidate_summary["duplicate_suggestions"] == 1
     rendered = render_report(report)
-    assert "Comparison lane: MATCHED-WORK" in rendered
+    assert "Internal work: same" in rendered
     assert "paired bootstrap 95% CI [2, 2]" in rendered
 
 
@@ -141,13 +142,13 @@ def test_changed_work_is_rejected_unless_explicitly_labeled() -> None:
         build_comparison_report(candidate, baseline)
 
     report = build_comparison_report(candidate, baseline, allow_changed_work=True)
-    assert report["comparison_lane"] == "changed-work"
+    assert report["work_matches"] is False
     mismatches = cast(list[dict[str, object]], report["work_mismatches"])
     differences = cast(dict[str, object], mismatches[0]["differences"])
     assert "gp_update_steps" in differences
     assert "reuse_parameters" in differences
     rendered = render_report(report)
-    assert "Comparison lane: CHANGED-WORK" in rendered
+    assert "Internal work: different" in rendered
     assert "not speedups" in rendered
 
 
@@ -197,7 +198,7 @@ def test_report_aggregates_and_displays_upstream_numerical_fallbacks() -> None:
     assert "fit_give_ups=1, random_prediction_fallbacks=4" in rendered
 
 
-def test_estimates_exclude_failed_or_degraded_pairs_but_keep_jitter_only_pairs() -> None:
+def test_estimates_keep_completed_degraded_pairs_and_exclude_raw_failures() -> None:
     keys = [("toy-quality", "sphere-2d", seed) for seed in range(5)]
     candidate_seconds = [1.0, 2.0, 10.0, 20.0, 30.0]
     baseline_seconds = [2.0, 6.0, 100.0, 200.0, 300.0]
@@ -249,25 +250,25 @@ def test_estimates_exclude_failed_or_degraded_pairs_but_keep_jitter_only_pairs()
     case = cast(
         dict[str, object], cast(dict[str, object], report["cases"])["toy-quality/sphere-2d"]
     )
-    assert case["pair_counts"] == {"total": 5, "eligible": 2, "excluded": 3}
+    assert case["pair_counts"] == {"total": 5, "eligible": 4, "excluded": 1}
     speedups = cast(dict[str, dict[str, object]], case["baseline_over_candidate_speedup"])
-    assert speedups["driver.suggest.first_model"]["pairs"] == 2
-    assert speedups["driver.suggest.first_model"]["estimate"] == pytest.approx(2.5)
+    assert speedups["driver.suggest.first_model"]["pairs"] == 4
+    assert speedups["driver.suggest.first_model"]["estimate"] == pytest.approx(6.5)
     regret = cast(dict[str, object], case["baseline_minus_candidate_regret"])
-    assert regret["pairs"] == 2
-    assert regret["estimate"] == pytest.approx(0.25)
+    assert regret["pairs"] == 4
+    assert regret["estimate"] == pytest.approx(2.7)
 
     candidate_summary = cast(dict[str, object], case["candidate"])
     baseline_summary = cast(dict[str, object], case["baseline"])
-    assert candidate_summary["median_normalized_regret"] == pytest.approx(0.1)
-    assert baseline_summary["median_normalized_regret"] == pytest.approx(0.35)
+    assert candidate_summary["median_normalized_regret"] == pytest.approx(2.55)
+    assert baseline_summary["median_normalized_regret"] == pytest.approx(5.25)
     candidate_phases = cast(dict[str, dict[str, object]], candidate_summary["phases"])
     baseline_phases = cast(dict[str, dict[str, object]], baseline_summary["phases"])
-    assert candidate_phases["driver.suggest.first_model"]["median_seconds"] == pytest.approx(1.5)
-    assert baseline_phases["driver.suggest.first_model"]["median_seconds"] == pytest.approx(4.0)
+    assert candidate_phases["driver.suggest.first_model"]["median_seconds"] == pytest.approx(6.0)
+    assert baseline_phases["driver.suggest.first_model"]["median_seconds"] == pytest.approx(53.0)
     assert cast(dict[str, object], candidate_summary["numerical_stability"])["degraded_trials"] == 1
     assert cast(dict[str, object], baseline_summary["numerical_stability"])["degraded_trials"] == 1
 
     rendered = render_report(report)
-    assert "Estimate pairs: total=5, eligible=2, excluded=3" in rendered
-    assert "jitter-only pairs remain eligible" in rendered
+    assert "Estimate pairs: total=5, eligible=4, excluded=1" in rendered
+    assert "Completed numerical fallbacks remain" in rendered

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from leanhebo.search.duplicates import _duplicate_mask_canonical, duplicate_mask
+from leanhebo.search.duplicates import duplicate_mask
 from leanhebo.search.repair import MixedVariableSpec
 from leanhebo.search.sorting import crowding_distance, non_dominated_sort
 
@@ -70,12 +70,6 @@ def select_survivors(objectives: Tensor, n_survive: int) -> SurvivalSelection:
     return SurvivalSelection(indices=indices, ranks=ranks, crowding=crowding)
 
 
-def survival_indices(objectives: Tensor, n_survive: int) -> Tensor:
-    """Return only the candidate indices selected by NSGA-II survival."""
-
-    return select_survivors(objectives, n_survive).indices
-
-
 def elitist_survival(
     population: Tensor,
     objectives: Tensor,
@@ -84,7 +78,6 @@ def elitist_survival(
     spec: MixedVariableSpec | None = None,
     eliminate_duplicate_points: bool = True,
     duplicate_tolerance: float = 0.0,
-    _population_is_canonical: bool = False,
 ) -> SurvivalResult:
     """Apply canonical deduplication followed by rank-and-crowding survival."""
 
@@ -99,19 +92,11 @@ def elitist_survival(
 
     source_indices = torch.arange(population.shape[0], device=population.device)
     if eliminate_duplicate_points:
-        if _population_is_canonical:
-            keep = ~_duplicate_mask_canonical(
-                population,
-                existing=None,
-                spec=spec,
-                atol=duplicate_tolerance,
-            )
-        else:
-            keep = ~duplicate_mask(
-                population,
-                spec=spec,
-                atol=duplicate_tolerance,
-            )
+        keep = ~duplicate_mask(
+            population,
+            spec=spec,
+            atol=duplicate_tolerance,
+        )
         source_indices = source_indices[keep]
         population = population[keep]
         objectives = objectives[keep]

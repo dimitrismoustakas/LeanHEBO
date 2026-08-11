@@ -13,7 +13,6 @@ from leanhebo.search import (
     mutate_population,
     repair_population,
     sbx_crossover,
-    sobol_population,
 )
 
 
@@ -45,18 +44,6 @@ def test_repair_is_idempotent_and_canonicalizes_every_variable_kind() -> None:
         torch.tensor([[0.0, 2.0, 2.0, 0.0, 1.0], [1.0, 6.0, 0.0, 1.0, 1.0]]),
     )
     assert torch.equal(repair_population(repaired, spec), repaired)
-
-
-def test_sobol_population_is_generator_deterministic_and_repaired() -> None:
-    spec = _mixed_spec()
-
-    first = sobol_population(spec, 16, generator=torch.Generator().manual_seed(5))
-    second = sobol_population(spec, 16, generator=torch.Generator().manual_seed(5))
-
-    assert torch.equal(first, second)
-    assert torch.equal(first[:, 1] % 2.0, torch.zeros(16))
-    assert torch.equal(first[:, 2:4], torch.round(first[:, 2:4]))
-    assert torch.equal(first[:, 4], torch.ones(16))
 
 
 def test_step_repair_never_clips_to_an_off_lattice_upper_bound() -> None:

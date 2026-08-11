@@ -121,7 +121,7 @@ def build_comparison_report(
         eligible_pairs = [
             (candidate, baseline)
             for candidate, baseline in zip(candidate_group, baseline_group, strict=True)
-            if _eligible_for_estimates(candidate) and _eligible_for_estimates(baseline)
+            if not _has_raw_failure(candidate) and not _has_raw_failure(baseline)
         ]
         eligible_candidates = [candidate for candidate, _ in eligible_pairs]
         eligible_baselines = [baseline for _, baseline in eligible_pairs]
@@ -152,7 +152,7 @@ def build_comparison_report(
         }
 
     return {
-        "comparison_lane": "changed-work" if work_mismatches else "matched-work",
+        "work_matches": not work_mismatches,
         "allow_changed_work": allow_changed_work,
         "candidate": _implementation_identity(candidate_results.values()),
         "baseline": _implementation_identity(baseline_results.values()),
@@ -163,19 +163,21 @@ def build_comparison_report(
 
 
 def render_report(report: Mapping[str, object]) -> str:
-    """Render a compact human-readable report with an unambiguous lane label."""
+    """Render a compact human-readable comparison report."""
 
-    lane = _required_string(report.get("comparison_lane"), path="comparison_lane")
+    work_matches = report.get("work_matches")
+    if not isinstance(work_matches, bool):
+        raise TypeError("work_matches must be Boolean")
     candidate = _mapping(report.get("candidate"), path="candidate")
     baseline = _mapping(report.get("baseline"), path="baseline")
     lines = [
-        f"Comparison lane: {lane.upper()}",
+        f"Internal work: {'same' if work_matches else 'different'}",
         f"Candidate: {_required_string(candidate.get('name'), path='candidate.name')}",
         f"Baseline: {_required_string(baseline.get('name'), path='baseline.name')}",
         f"Paired results: {_display(report.get('paired_result_count', 0))}",
     ]
-    if lane == "changed-work":
-        lines.append("WARNING: speed ratios below are changed-work observations, not speedups.")
+    if not work_matches:
+        lines.append("WARNING: timing ratios compare different internal work and are not speedups.")
 
     cases = _mapping(report.get("cases"), path="cases")
     for label, raw_case in sorted(cases.items()):
@@ -190,8 +192,8 @@ def render_report(report: Mapping[str, object]) -> str:
             f"excluded={pair_counts.get('excluded', 0)}"
         )
         lines.append(
-            "Exclusion rule: omit pairs with raw failures or numerical fit/prediction "
-            "fallbacks from phase and regret estimates; jitter-only pairs remain eligible."
+            "Exclusion rule: omit only pairs with raw benchmark failures. Completed numerical "
+            "fallbacks remain in phase and regret estimates and are reported below."
         )
         for side in ("candidate", "baseline"):
             summary = _mapping(case.get(side), path=f"cases.{label}.{side}")
@@ -320,13 +322,6 @@ def _summarize_numerical_stability(records: Sequence[RawResult]) -> dict[str, ob
         "random_prediction_fallback_trials": random_prediction_fallback_trials,
         "degraded_trials": degraded_trials,
     }
-
-
-def _eligible_for_estimates(result: RawResult) -> bool:
-    if _has_raw_failure(result):
-        return False
-    numerical = _record_numerical_stability(result)
-    return numerical is None or not numerical.degraded
 
 
 def _has_raw_failure(result: RawResult) -> bool:

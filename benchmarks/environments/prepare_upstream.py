@@ -42,8 +42,8 @@ class UpstreamManifest:
     @classmethod
     def load(cls, path: Path) -> UpstreamManifest:
         raw: Any = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
-            raise ValueError(f"unsupported upstream manifest schema in {path}")
+        if not isinstance(raw, dict):
+            raise ValueError(f"upstream manifest must be a JSON object: {path}")
         manifest = cls(
             name=_required_string(raw, "name"),
             repository=_required_string(raw, "repository"),
@@ -192,7 +192,6 @@ def _write_receipt(
     interpreter: Path | None,
 ) -> None:
     receipt = {
-        "schema_version": 1,
         "name": manifest.name,
         "repository": manifest.repository,
         "commit": manifest.commit,

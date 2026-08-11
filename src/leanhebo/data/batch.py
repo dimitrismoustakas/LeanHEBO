@@ -173,14 +173,6 @@ class CandidateBatch:
             self.decoded_columns,
         )
 
-    def detach(self) -> CandidateBatch:
-        return CandidateBatch(
-            self.continuous.detach(),
-            self.categorical.detach(),
-            self.space_fingerprint,
-            self.decoded_columns,
-        )
-
     def select(self, rows: torch.Tensor | slice | Sequence[int]) -> CandidateBatch:
         encoded = self.encoded.select(rows)
         if isinstance(rows, slice):

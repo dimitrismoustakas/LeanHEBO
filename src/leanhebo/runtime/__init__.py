@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: MIT
 
-"""Runtime configuration helpers."""
+"""Independent Torch random streams."""
 
-from leanhebo.runtime.process import ProcessConfiguration, configure_process
 from leanhebo.runtime.rng import RandomStreams, make_generator
 
-__all__ = ["ProcessConfiguration", "RandomStreams", "configure_process", "make_generator"]
+__all__ = ["RandomStreams", "make_generator"]

@@ -2,7 +2,7 @@
 
 """Persistent exact Gaussian-process surrogate."""
 
+from leanhebo.diagnostics import FitReport
 from leanhebo.gp.exact import ExactGPSurrogate
-from leanhebo.gp.reports import FitReport
 
 __all__ = ["ExactGPSurrogate", "FitReport"]

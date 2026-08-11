@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import math
-import platform
 from collections.abc import Mapping
 from dataclasses import replace
-from importlib import metadata
 from pathlib import Path
 from typing import Any, Self, cast
 
@@ -18,24 +16,28 @@ import torch
 from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator, PosteriorStats
 from leanhebo.checkpoint import load_checkpoint, save_checkpoint
 from leanhebo.config import LeanHEBOConfig
-from leanhebo.data import CandidateBatch, EncodedBatch, ObservationStore
+from leanhebo.data import CandidateBatch, EncodedBatch
+from leanhebo.data.store import ObservationStore
 from leanhebo.diagnostics import Diagnostics, FitReport
 from leanhebo.errors import CheckpointError, NumericalError, SearchSpaceExhaustedError
 from leanhebo.gp import ExactGPSurrogate
 from leanhebo.runtime.rng import RandomStreams
 from leanhebo.search import MixedVariableSpec, NSGA2Result, TorchNSGA2
-from leanhebo.space import CompiledSpace, FixedInput, Space
+from leanhebo.space import (
+    Bool,
+    Categorical,
+    CompiledSpace,
+    FixedInput,
+    Float,
+    Integer,
+    Parameter,
+    Space,
+)
 from leanhebo.transforms import OutputTransform
-
-_STATE_SCHEMA_VERSION = 2
 
 
 class LeanHEBO:
     """Single-objective HEBO with persistent tensor-native runtime state."""
-
-    support_parallel_opt = True
-    support_combinatorial = True
-    support_contextual = True
 
     def __init__(
         self,
@@ -58,15 +60,11 @@ class LeanHEBO:
                 if space.dtype == self.dtype
                 else CompiledSpace(space.parameters, dtype=self.dtype)
             )
-        if self.config.runtime.deterministic:
-            # This is deliberately opt-in because Torch's deterministic policy is process-global.
-            torch.use_deterministic_algorithms(True)
         self.diagnostics = Diagnostics(self.config.runtime)
         self.store = ObservationStore(
             self.space,
             device=self.device,
             nonfinite=self.config.nonfinite_policy,
-            retain_decoded=False,
         )
         self.output_transform = OutputTransform(cast(Any, self.config.warp)).to(
             device=self.device, dtype=self.dtype
@@ -82,7 +80,6 @@ class LeanHEBO:
         self._model_observation_version = -1
         self._force_full_refit = False
         self._previous_population: torch.Tensor | None = None
-        self._search_history: list[tuple[torch.Tensor, torch.Tensor]] = []
         self._last_search: NSGA2Result | None = None
 
     @property
@@ -101,15 +98,6 @@ class LeanHEBO:
     @property
     def last_search(self) -> NSGA2Result | None:
         return self._last_search
-
-    @property
-    def search_history(self) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
-        """Return defensive snapshots retained when ``SearchConfig.keep_history`` is enabled."""
-
-        return tuple(
-            (population.clone(), objectives.clone())
-            for population, objectives in self._search_history
-        )
 
     def _new_sobol_engine(self) -> torch.quasirandom.SobolEngine:
         return torch.quasirandom.SobolEngine(  # type: ignore[no-untyped-call]
@@ -204,9 +192,7 @@ class LeanHEBO:
             raise RuntimeError("at least two finite observations are required for model fitting")
         with self.diagnostics.phase("suggest.fit_output_transform"):
             transformed = self.output_transform.fit_transform(observations.y)
-            self.store.set_transformed_y(
-                transformed, observation_version=observations.observation_version
-            )
+            self.store.set_transformed_y(transformed)
         if self._surrogate is None:
             with self.diagnostics.phase("suggest.gp_construct"):
                 self._surrogate = self._make_surrogate()
@@ -233,7 +219,6 @@ class LeanHEBO:
         posterior = PosteriorEvaluator(
             self._surrogate,
             batch_size=self.config.runtime.acquisition_batch_size,
-            cache=self.config.acquisition.posterior_cache,
         )
         incumbent = self._incumbent(fixed)
         incumbent_stats = posterior.evaluate(incumbent.continuous, incumbent.categorical)
@@ -254,10 +239,8 @@ class LeanHEBO:
             encoded = self.space.encoded_from_dense(dense, repair=True, fixed=fixed)
             return mace(encoded.continuous, encoded.categorical)
 
-        search_objective = objective
-        if self.config.runtime.enable_torch_compile:
-            search_objective = torch.compile(objective, dynamic=True)
         search = TorchNSGA2(
+            self._search_spec(fixed),
             population_size=self.config.search.population_size,
             generations=self.config.search.generations,
             crossover_probability=self.config.search.crossover_probability,
@@ -267,24 +250,22 @@ class LeanHEBO:
             tournament_size=self.config.search.tournament_size,
             eliminate_duplicate_points=self.config.search.eliminate_duplicates,
         )
-        specification = self._search_spec(fixed)
         previous = (
             self._previous_population if self.config.search.reuse_previous_population else None
         )
         with self.diagnostics.phase("suggest.search.total"):
             result = search.minimize(
-                search_objective,
-                space=specification,
+                objective,
                 incumbents=self.space.to_dense(incumbent),
                 initial_population=previous,
                 generator=self.random.search,
             )
         self._last_search = result
-        self._previous_population = result.population.detach()
-        if self.config.search.keep_history:
-            self._search_history.append(
-                (result.population.detach().clone(), result.objectives.detach().clone())
-            )
+        self._previous_population = (
+            result.population.detach().clone()
+            if self.config.search.reuse_previous_population
+            else None
+        )
         pool = result.pareto_population
         if pool.shape[0] == 0:
             pool = result.population
@@ -413,6 +394,10 @@ class LeanHEBO:
                 encoded_rows.append(draw.select(keep).encoded)
             attempts += 1
         if retained < requested:
+            completion = self._finite_unseen(requested - retained, fixed, seen)
+            encoded_rows.extend(completion)
+            retained += sum(len(batch) for batch in completion)
+        if retained < requested:
             missing = requested - retained
             self.diagnostics.increment("suggest.uniqueness_exhausted", missing)
             raise SearchSpaceExhaustedError(
@@ -426,19 +411,116 @@ class LeanHEBO:
             fixed=fixed,
         ).select(slice(0, requested))
 
+    @staticmethod
+    def _finite_cardinality(
+        parameter: Parameter,
+        fixed_values: Mapping[str, object],
+    ) -> int | None:
+        if parameter.name in fixed_values:
+            return 1
+        if isinstance(parameter, Float):
+            return None
+        if isinstance(parameter, Integer):
+            if parameter.exponent:
+                lower, upper = parameter.optimization_bounds
+                return round(upper - lower) + 1
+            return (parameter.high - parameter.low) // parameter.step + 1
+        if isinstance(parameter, Categorical):
+            return len(parameter.categories)
+        if isinstance(parameter, Bool):
+            return 2
+        raise TypeError(f"unsupported parameter type {type(parameter).__name__}")
+
+    @staticmethod
+    def _finite_value(
+        parameter: Parameter,
+        index: int,
+        fixed_values: Mapping[str, object],
+    ) -> object:
+        if parameter.name in fixed_values:
+            return fixed_values[parameter.name]
+        if isinstance(parameter, Integer):
+            if parameter.exponent:
+                lower, _ = parameter.optimization_bounds
+                return int(parameter.base) ** (round(lower) + index)
+            return parameter.low + index * parameter.step
+        if isinstance(parameter, Categorical):
+            return parameter.categories[index]
+        if isinstance(parameter, Bool):
+            return bool(index)
+        raise TypeError(f"parameter {parameter.name!r} does not have a finite domain")
+
+    def _finite_unseen(
+        self,
+        requested: int,
+        fixed: FixedInput | None,
+        seen: set[tuple[int, ...]],
+    ) -> list[EncodedBatch]:
+        """Return deterministic unseen rows when the contextual domain is finite."""
+
+        if requested == 0:
+            return []
+        fixed_values = {} if fixed is None else dict(fixed.decoded_values)
+        cardinalities: list[int] = []
+        for parameter in self.space.parameters:
+            cardinality = self._finite_cardinality(parameter, fixed_values)
+            if cardinality is None:
+                return []
+            cardinalities.append(cardinality)
+
+        blocked = set(self.store.key_snapshot()) | seen
+        completed: list[EncodedBatch] = []
+        completed_count = 0
+        total = math.prod(cardinalities)
+        chunk_size = max(64, min(1024, requested * 4))
+        for start in range(0, total, chunk_size):
+            records: list[dict[str, object]] = []
+            for ordinal in range(start, min(start + chunk_size, total)):
+                remainder = ordinal
+                indices = [0] * len(cardinalities)
+                for position in range(len(cardinalities) - 1, -1, -1):
+                    remainder, indices[position] = divmod(remainder, cardinalities[position])
+                records.append(
+                    {
+                        parameter.name: self._finite_value(
+                            parameter,
+                            index,
+                            fixed_values,
+                        )
+                        for parameter, index in zip(
+                            self.space.parameters,
+                            indices,
+                            strict=True,
+                        )
+                    }
+                )
+            encoded = self.space.encode(records).to(self.device, dtype=self.dtype)
+            keep: list[int] = []
+            for index, key in enumerate(self.space.canonical_keys(encoded)):
+                if key in blocked:
+                    continue
+                keep.append(index)
+                blocked.add(key)
+                seen.add(key)
+                if len(keep) + completed_count == requested:
+                    break
+            if keep:
+                completed.append(encoded.select(keep))
+                completed_count += len(keep)
+            if completed_count == requested:
+                break
+        return completed
+
     def observe(self, candidates: CandidateBatch | EncodedBatch | object, y: object) -> int:
         """Append finite objective observations without doing eager GP work."""
 
         with self.diagnostics.phase("observe.total"):
             discarded_before = self.store.discarded_count
             retained = self.store.append(candidates, y)  # type: ignore[arg-type]
-            self.diagnostics.increment("observe.received", retained)
-            self.diagnostics.increment(
-                "observe.discarded", self.store.discarded_count - discarded_before
-            )
+            discarded = self.store.discarded_count - discarded_before
+            self.diagnostics.increment("observe.received", retained + discarded)
+            self.diagnostics.increment("observe.discarded", discarded)
             return retained
-
-    observe_new_data = observe
 
     def refit(self) -> FitReport | None:
         """Run an explicit full GP refit now when model-based data are available."""
@@ -462,84 +544,45 @@ class LeanHEBO:
             raise RuntimeError("no data has been observed")
         return float(self.store._materialize_view().y.min().detach().cpu())
 
-    def state_dict(self) -> dict[str, Any]:
-        """Return only LeanHEBO-defined tensors and checkpoint-safe primitives."""
-
-        observation_chunks = [
-            {
-                "continuous": encoded.continuous.detach().cpu(),
-                "categorical": encoded.categorical.detach().cpu(),
-                "y": outcomes.detach().cpu(),
-            }
-            for encoded, outcomes in zip(
-                self.store.encoded_chunks, self.store.y_chunks, strict=True
-            )
-        ]
+    def _checkpoint_state(self) -> dict[str, Any]:
+        observations = self.store._materialize_view()
         return {
-            "schema_version": _STATE_SCHEMA_VERSION,
             "config": self.config.to_dict(),
             "space": self.public_space.to_spec(),
-            "space_fingerprint": self.space.fingerprint,
-            "observations": observation_chunks,
-            "duplicate_keys": [list(key) for key in self.store.key_snapshot()],
-            "discarded_observations": self.store.discarded_count,
+            "observations": {
+                "continuous": observations.continuous.detach().cpu(),
+                "categorical": observations.categorical.detach().cpu(),
+                "y": observations.y.detach().cpu(),
+            },
+            "discarded_count": self.store.discarded_count,
             "output_transform": self.output_transform.state_dict(),
             "surrogate": (None if self._surrogate is None else self._surrogate.state_dict()),
-            "diagnostics": self.diagnostics.state_dict(),
+            "model_current": (
+                self._surrogate is not None
+                and self._model_observation_version == self.store.observation_version
+            ),
             "random": self.random.state_dict(),
             "sobol_draw_count": self._sobol_draw_count,
-            "observation_version": self.store.observation_version,
-            "store_transform_version": self.store.transform_version,
-            "model_observation_version": self._model_observation_version,
             "previous_population": (
                 None
                 if self._previous_population is None
-                else self._previous_population.detach().cpu()
+                else self._previous_population.detach().cpu().clone()
             ),
-            "search_history": [
-                {
-                    "population": population.detach().cpu(),
-                    "objectives": objectives.detach().cpu(),
-                }
-                for population, objectives in self._search_history
-            ],
-            "versions": {
-                "torch": str(torch.__version__),
-                "python": platform.python_version(),
-                "leanhebo": _installed_version("leanhebo"),
-                "gpytorch": _installed_version("gpytorch"),
-                "numpy": _installed_version("numpy"),
-                "schema": _STATE_SCHEMA_VERSION,
-            },
         }
 
-    def load_state_dict(self, state: Mapping[str, Any]) -> None:
-        if int(state.get("schema_version", -1)) != _STATE_SCHEMA_VERSION:
-            raise ValueError("unsupported LeanHEBO optimizer state schema")
-        if state.get("space_fingerprint") != self.space.fingerprint:
-            raise ValueError("checkpoint design space does not match this optimizer")
-        saved_config = LeanHEBOConfig.from_dict(state["config"])
-        if saved_config != self.config:
-            raise ValueError("checkpoint configuration does not match this optimizer")
-        saved_model_observation_version = int(state["model_observation_version"])
-        saved_observation_version = int(state["observation_version"])
-        saved_store_transform_version = state["store_transform_version"]
-        model_was_current = (
-            state.get("surrogate") is not None
-            and saved_model_observation_version == saved_observation_version
-        )
+    def _restore_checkpoint_state(self, state: Mapping[str, Any]) -> None:
         self.store.clear()
-        for chunk in state["observations"]:
-            encoded = EncodedBatch(chunk["continuous"], chunk["categorical"])
-            self.store.append(encoded, chunk["y"])
-        self.store.restore_keys(state["duplicate_keys"])
-        discarded = state["discarded_observations"]
+        observations = state["observations"]
+        encoded = EncodedBatch(observations["continuous"], observations["categorical"])
+        if len(encoded):
+            self.store.append(encoded, observations["y"])
+        discarded = state["discarded_count"]
         if isinstance(discarded, bool) or not isinstance(discarded, int) or discarded < 0:
             raise ValueError("checkpoint discarded-observation count is invalid")
         self.store.discarded_count = discarded
         self.output_transform.load_state_dict(state["output_transform"])
         self.output_transform.to(device=self.device, dtype=self.dtype)
-        surrogate_state = state.get("surrogate")
+        surrogate_state = state["surrogate"]
         if surrogate_state is not None:
             self._surrogate = self._make_surrogate()
             self._surrogate.load_state_dict(surrogate_state)
@@ -547,15 +590,7 @@ class LeanHEBO:
                 self.store.set_transformed_y(self.output_transform.transform(self.store.y))
         else:
             self._surrogate = None
-        self.store.restore_versions(
-            saved_observation_version,
-            saved_store_transform_version,
-        )
         self.random.load_state_dict(dict(state["random"]))
-        diagnostics_state = state["diagnostics"]
-        if not isinstance(diagnostics_state, Mapping):
-            raise TypeError("checkpoint diagnostics state is malformed")
-        self.diagnostics.load_state_dict(diagnostics_state)
         self._sobol = self._new_sobol_engine()
         self._sobol_draw_count = int(state["sobol_draw_count"])
         if self._sobol_draw_count:
@@ -563,34 +598,19 @@ class LeanHEBO:
                 self._sobol_draw_count
             )
         self._model_observation_version = (
-            self.store.observation_version if model_was_current else -1
+            self.store.observation_version if state["model_current"] else -1
         )
-        previous = state.get("previous_population")
+        previous = state["previous_population"]
         self._previous_population = (
             None
-            if previous is None
-            else torch.as_tensor(previous, device=self.device, dtype=self.dtype)
+            if previous is None or not self.config.search.reuse_previous_population
+            else torch.as_tensor(previous, device=self.device, dtype=self.dtype).clone()
         )
         self._force_full_refit = False
         self._last_search = None
-        history = state["search_history"]
-        if not isinstance(history, list):
-            raise TypeError("checkpoint search history is malformed")
-        restored_history: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for item in history:
-            if not isinstance(item, Mapping):
-                raise TypeError("checkpoint search history entry is malformed")
-            population = torch.as_tensor(item["population"], device=self.device, dtype=self.dtype)
-            objectives = torch.as_tensor(item["objectives"], device=self.device, dtype=self.dtype)
-            if population.ndim != 2 or population.shape[1] != self.space.dense_dimension:
-                raise ValueError("checkpoint search population has an incompatible shape")
-            if objectives.ndim != 2 or objectives.shape[0] != population.shape[0]:
-                raise ValueError("checkpoint search objectives have an incompatible shape")
-            restored_history.append((population.clone(), objectives.clone()))
-        self._search_history = restored_history
 
     def save(self, path: str | Path) -> None:
-        save_checkpoint(path, self.state_dict())
+        save_checkpoint(path, self._checkpoint_state())
 
     @classmethod
     def load(
@@ -607,11 +627,9 @@ class LeanHEBO:
                     config,
                     runtime=replace(config.runtime, device=str(torch.device(map_location))),
                 )
-                state = dict(state)
-                state["config"] = config.to_dict()
             space = Space.from_spec(state["space"])
             optimizer = cls(space, config=config)
-            optimizer.load_state_dict(state)
+            optimizer._restore_checkpoint_state(state)
             return optimizer
         except CheckpointError:
             raise
@@ -619,10 +637,3 @@ class LeanHEBO:
             raise CheckpointError(
                 f"checkpoint payload is malformed or incompatible: {error}"
             ) from error
-
-
-def _installed_version(distribution: str) -> str:
-    try:
-        return metadata.version(distribution)
-    except metadata.PackageNotFoundError:
-        return "unknown"

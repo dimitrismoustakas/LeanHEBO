@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
 import torch
 
@@ -52,6 +54,42 @@ def _fantasy_surrogate(*, categories: tuple[int, ...] = ()) -> ExactGPSurrogate:
     )
 
 
+@pytest.mark.parametrize("optimizer", ["psgld", "adam", "lbfgs"])
+def test_public_gp_optimizer_choices_fit_and_predict(
+    optimizer: Literal["psgld", "adam", "lbfgs"],
+) -> None:
+    gp = ExactGPSurrogate(
+        num_continuous=1,
+        category_sizes=(),
+        config=GPConfig(
+            optimizer=optimizer,
+            initial_steps=1,
+            update_steps=1,
+            full_refit_interval=None,
+            full_refit_growth_factor=None,
+            lbfgs_max_iter=1,
+        ),
+        runtime=RuntimeConfig(seed=3),
+        generator=make_generator("cpu", 3),
+    )
+    continuous = torch.tensor([[0.0], [0.4], [0.7], [1.0]])
+    categorical = torch.empty((4, 0), dtype=torch.long)
+    targets = torch.tensor([1.0, 0.2, 0.1, 0.8])
+
+    report = gp.fit(continuous, categorical, targets, transform_version=1)
+    mean, variance, noise = gp.predict(
+        torch.tensor([[0.25], [0.85]]),
+        torch.empty((2, 0), dtype=torch.long),
+    )
+
+    assert report.kind == "initial"
+    assert report.completed_steps == 1
+    assert mean.shape == variance.shape == (2,)
+    assert torch.isfinite(mean).all()
+    assert torch.all(variance > 0)
+    assert noise > 0
+
+
 def test_persistent_update_reuses_model_and_changes_train_data() -> None:
     gp = _surrogate()
     continuous = torch.linspace(0, 1, 6).reshape(-1, 1)
@@ -87,7 +125,6 @@ def test_fantasy_update_matches_set_train_data_and_preserves_prediction_cache() 
     gp.predict(continuous[:1], categorical[:1])
     assert gp.model is not None and gp.model.prediction_strategy is not None
     model_id = id(gp.model)
-    scaler_version = gp.input_scaler_version
 
     reference = ExactGPSurrogate(
         num_continuous=1,
@@ -110,7 +147,6 @@ def test_fantasy_update_matches_set_train_data_and_preserves_prediction_cache() 
     assert report.kind == "fantasy_update"
     assert gp.model is not None and id(gp.model) != model_id
     assert gp.model.prediction_strategy is not None
-    assert gp.input_scaler_version == scaler_version
     assert gp.diagnostics is not None
     assert gp.diagnostics.counters["gp.fantasy_update"] == 1
     model_parameters = {id(parameter) for parameter in gp.model.parameters()}
@@ -141,12 +177,10 @@ def test_fantasy_update_falls_back_when_input_scaling_would_change() -> None:
     targets = continuous[:, 0].square()
     gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
     gp.predict(continuous[:1], categorical[:1])
-    scaler_version = gp.input_scaler_version
 
     report = gp.fit(continuous, categorical, targets, transform_version=1)
 
     assert report.kind == "update"
-    assert gp.input_scaler_version == scaler_version + 1
     torch.testing.assert_close(gp.input_scaler.data_max_, torch.tensor([2.0]))  # type: ignore[union-attr]
     assert gp.diagnostics is not None
     assert gp.diagnostics.counters["gp.fantasy_fallback"] == 1
@@ -287,7 +321,6 @@ def test_input_scaler_fits_the_observed_range_instead_of_design_bounds() -> None
     )
     torch.testing.assert_close(gp.input_scaler.data_min_, torch.tensor([40.0]))  # type: ignore[union-attr]
     torch.testing.assert_close(gp.input_scaler.data_max_, torch.tensor([60.0]))  # type: ignore[union-attr]
-    assert gp.input_scaler_version == 1
 
 
 def test_observed_range_scaler_and_predictions_survive_state_round_trip() -> None:
@@ -304,7 +337,6 @@ def test_observed_range_scaler_and_predictions_survive_state_round_trip() -> Non
     restored.load_state_dict(gp.state_dict())
     actual = restored.predict(query, query_categories)
 
-    assert restored.input_scaler_version == gp.input_scaler_version
     torch.testing.assert_close(restored.input_scaler.data_min_, torch.tensor([40.0]))  # type: ignore[union-attr]
     torch.testing.assert_close(restored.input_scaler.data_max_, torch.tensor([65.0]))  # type: ignore[union-attr]
     for actual_value, expected_value in zip(actual, expected, strict=True):
@@ -335,7 +367,6 @@ def test_categorical_only_gp_uses_checkpointed_identity_input_scaler() -> None:
     restored.load_state_dict(gp.state_dict())
     actual = restored.predict(continuous[:2], categorical[:2])
 
-    assert restored.input_scaler_version == 1
     for actual_value, expected_value in zip(actual, expected, strict=True):
         torch.testing.assert_close(actual_value, expected_value)
 

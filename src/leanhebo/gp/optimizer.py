@@ -70,7 +70,6 @@ class PreconditionedSGLD(torch.optim.RMSprop):
 
         state = super().state_dict()
         state["leanhebo_psgld"] = {
-            "schema_version": 1,
             "factor": self.factor,
             "pretrain_steps": self.pretrain_steps,
             "steps": self.steps,
@@ -78,20 +77,18 @@ class PreconditionedSGLD(torch.optim.RMSprop):
         return state
 
     def load_state_dict(self, state_dict: Mapping[str, Any]) -> None:
-        """Restore custom state while accepting ordinary RMSprop state dictionaries."""
+        """Restore the RMSprop state and sampling schedule."""
 
         base_state = dict(state_dict)
         custom = base_state.pop("leanhebo_psgld", None)
-        super().load_state_dict(base_state)
-        if custom is None:
-            return
-        if not isinstance(custom, Mapping) or int(custom.get("schema_version", -1)) != 1:
+        if not isinstance(custom, Mapping):
             raise ValueError("invalid PreconditionedSGLD state")
         factor = float(custom["factor"])
         pretrain_steps = int(custom["pretrain_steps"])
         steps = int(custom["steps"])
         if not math.isfinite(factor) or factor <= 0 or pretrain_steps < 0 or steps < 0:
             raise ValueError("invalid PreconditionedSGLD schedule state")
+        super().load_state_dict(base_state)
         self.factor = factor
         self.pretrain_steps = pretrain_steps
         self.steps = steps

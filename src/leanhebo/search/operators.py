@@ -221,10 +221,6 @@ def sbx_crossover(
     return child_a, child_b
 
 
-# Descriptive alias used in documentation.
-simulated_binary_crossover = sbx_crossover
-
-
 def uniform_categorical_crossover(
     parent_a: Tensor,
     parent_b: Tensor,
@@ -445,7 +441,3 @@ def mutate_population(
         generator=generator,
     )
     return repair_population(mixed, spec)
-
-
-# Generic short spelling for external integration.
-numeric_mutation = polynomial_mutation

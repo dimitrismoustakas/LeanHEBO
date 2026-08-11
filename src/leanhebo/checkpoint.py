@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 
-"""Versioned, tensor-and-primitive-only LeanHEBO checkpoints."""
+"""Safe, atomic persistence for LeanHEBO optimizer state."""
 
 from __future__ import annotations
 
@@ -16,20 +16,9 @@ import torch
 
 from leanhebo.errors import CheckpointError
 
-CHECKPOINT_KIND = "leanhebo.optimizer"
-CHECKPOINT_SCHEMA_VERSION = 1
-
-
-def make_checkpoint(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "kind": CHECKPOINT_KIND,
-        "schema_version": CHECKPOINT_SCHEMA_VERSION,
-        "payload": dict(payload),
-    }
-
 
 def save_checkpoint(path: str | os.PathLike[str], payload: Mapping[str, Any]) -> None:
-    """Atomically save a versioned checkpoint using Torch's tensor-aware format."""
+    """Atomically save tensor-and-primitive optimizer state."""
 
     destination = Path(path).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +28,7 @@ def save_checkpoint(path: str | os.PathLike[str], payload: Mapping[str, Any]) ->
     os.close(handle)
     temporary = Path(temporary_name)
     try:
-        torch.save(make_checkpoint(payload), temporary)
+        torch.save(dict(payload), temporary)
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
@@ -63,11 +52,6 @@ def load_checkpoint(
         struct.error,
     ) as exc:
         raise CheckpointError(f"failed to load LeanHEBO checkpoint: {exc}") from exc
-    if not isinstance(state, Mapping) or state.get("kind") != CHECKPOINT_KIND:
-        raise CheckpointError("file is not a LeanHEBO optimizer checkpoint")
-    if state.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
-        raise CheckpointError(f"unsupported checkpoint schema: {state.get('schema_version')!r}")
-    payload = state.get("payload")
-    if not isinstance(payload, Mapping):
-        raise CheckpointError("checkpoint payload is missing or malformed")
-    return dict(payload)
+    if not isinstance(state, Mapping):
+        raise CheckpointError("checkpoint payload is malformed")
+    return dict(state)

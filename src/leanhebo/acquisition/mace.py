@@ -16,8 +16,6 @@ from leanhebo.errors import NumericalError
 class MACEEvaluator:
     """Compute stochastic LCB, negative log-EI, and negative log-PI."""
 
-    num_objectives = 3
-
     def __init__(
         self,
         posterior: PosteriorEvaluator,

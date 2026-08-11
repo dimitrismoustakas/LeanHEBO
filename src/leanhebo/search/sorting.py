@@ -36,7 +36,10 @@ def dominance_matrix(objectives: Tensor) -> Tensor:
     return no_worse & ~no_worse.mT
 
 
-def _sort_from_dominance(dominates: Tensor) -> tuple[Tensor, list[Tensor]]:
+def non_dominated_sort(objectives: Tensor) -> Tensor:
+    """Assign zero-based Pareto ranks to a minimization objective matrix."""
+
+    dominates = dominance_matrix(objectives)
     population_size = dominates.shape[0]
     ranks = torch.full(
         (population_size,),
@@ -45,42 +48,21 @@ def _sort_from_dominance(dominates: Tensor) -> tuple[Tensor, list[Tensor]]:
         device=dominates.device,
     )
     if population_size == 0:
-        return ranks, []
+        return ranks
 
     domination_count = dominates.sum(dim=0, dtype=torch.long)
     current = torch.nonzero(domination_count == 0, as_tuple=False).flatten()
-    fronts: list[Tensor] = []
     rank = 0
 
     while current.numel():
         ranks[current] = rank
-        fronts.append(current)
         domination_count = domination_count - dominates[current].sum(dim=0, dtype=torch.long)
         current = torch.nonzero((domination_count == 0) & (ranks < 0), as_tuple=False).flatten()
         rank += 1
 
     if bool((ranks < 0).any()):  # Defensive: strict dominance should always form a DAG.
         raise RuntimeError("non-dominated sorting failed to assign every point")
-    return ranks, fronts
-
-
-def non_dominated_sort(objectives: Tensor) -> Tensor:
-    """Assign zero-based Pareto ranks to a minimization objective matrix."""
-
-    ranks, _ = _sort_from_dominance(dominance_matrix(objectives))
     return ranks
-
-
-def non_dominated_fronts(objectives: Tensor) -> list[Tensor]:
-    """Return index tensors for Pareto fronts in increasing rank order."""
-
-    _, fronts = _sort_from_dominance(dominance_matrix(objectives))
-    return fronts
-
-
-# Explicit naming used by some integration layers.
-non_dominated_ranks = non_dominated_sort
-fast_non_dominated_sort = non_dominated_sort
 
 
 def _front_crowding(objectives: Tensor) -> Tensor:

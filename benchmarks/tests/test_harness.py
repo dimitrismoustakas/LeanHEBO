@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
@@ -118,7 +116,6 @@ def test_phase_recorder_and_result_writer_emit_finite_json(tmp_path: Path) -> No
     )
     destination = write_result(result, tmp_path / "raw.json")
     payload = json.loads(destination.read_text(encoding="utf-8"))
-    assert "schema_version" not in payload
     assert payload["work"]["objective_evaluations"] == 1
     assert payload["phases"]["suggest.total"]["wall_seconds"][0] >= 0
     assert payload["runtime"]["packages"]["torch"] is not None
@@ -197,13 +194,20 @@ def test_leanhebo_quality_smoke_uses_public_suggest_observe_contract() -> None:
     )
     result = run_trial(make_adapter("leanhebo", SPHERE_2D, settings, seed=7), SPHERE_2D, 7)
     payload = result.to_dict()
-    assert result.failures == () or not result.failures
+    assert not result.failures
     metrics = payload["metrics"]
     quality = payload["quality"]
     assert isinstance(metrics, dict)
     assert isinstance(quality, dict)
     assert metrics["evaluations_completed"] == 2
     assert quality["normalized_regret"] is not None
+    implementation_metrics = metrics["implementation_metrics"]
+    assert isinstance(implementation_metrics, dict)
+    assert implementation_metrics["numerical_stability"] == {
+        "jitter": {"escalations": 0, "maximum_parameter": None},
+        "fit": {"give_ups": 0},
+        "prediction": {"random_fallbacks": 0},
+    }
     implementation = payload["implementation"]
     assert isinstance(implementation, dict)
     assert len(str(implementation["commit"])) == 40
@@ -258,6 +262,24 @@ def test_lean_adapter_declares_cold_and_persistent_lifecycle_work() -> None:
     assert persistent.use_set_train_data is True
     assert cold.posterior_batch_size is None
     assert cold.gp_optimizer == persistent.gp_optimizer == "psgld"
+
+
+def test_upstream_adapter_rejects_settings_it_cannot_apply_before_importing_upstream() -> None:
+    settings = RunSettings(
+        population_size=12,
+        generations=2,
+        posterior_batch_size=64,
+        model_lifecycle="persistent",
+    )
+
+    with pytest.raises(ValueError) as error:
+        make_adapter("upstream-hebo", SPHERE_2D, settings, seed=1)
+
+    message = str(error.value)
+    assert "model_lifecycle='cold'" in message
+    assert "population_size=100" in message
+    assert "generations=99" in message
+    assert "posterior_batch_size=None" in message
 
 
 class _SequenceAdapter:
@@ -320,43 +342,3 @@ def test_trial_fails_when_actual_search_work_differs_from_declaration() -> None:
     assert result.metrics["evaluations_completed"] == 2
     assert result.failures[0]["stage"] == "search-work"
     assert "actual=1, declared=2" in str(result.failures[0]["message"])
-
-
-def test_prepared_upstream_adapter_accepts_parallel_suggestions() -> None:
-    benchmark_root = Path(__file__).resolve().parents[1]
-    environment = benchmark_root / ".upstream" / "hebo-venv"
-    interpreter = (
-        environment / "Scripts" / "python.exe"
-        if os.name == "nt"
-        else environment / "bin" / "python"
-    )
-    if not interpreter.exists():
-        pytest.skip("the isolated upstream benchmark environment is not prepared")
-    script = """
-from benchmarks.quality.objectives import SPHERE_2D
-from benchmarks.quality.runner import RunSettings, make_adapter
-settings = RunSettings(
-    evaluation_budget=2,
-    batch_size=2,
-    random_samples=4,
-    population_size=100,
-    generations=99,
-    gp_initial_steps=0,
-    gp_update_steps=0,
-    posterior_batch_size=None,
-    model_lifecycle="cold",
-)
-adapter = make_adapter("upstream-hebo", SPHERE_2D, settings, seed=3)
-assert adapter.work.generations == 99
-assert adapter.work.search_candidate_evaluations == 10_000
-assert adapter.work.gp_optimizer == "psgld"
-assert adapter.work.reuse_parameters is False
-suggested = adapter.suggest(2)
-assert len(suggested.rows) == 2
-"""
-    subprocess.run(
-        [str(interpreter), "-c", script],
-        cwd=benchmark_root.parent,
-        check=True,
-        timeout=60,
-    )

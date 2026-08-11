@@ -25,8 +25,6 @@ from leanhebo.gp.kernel import (
 from leanhebo.gp.optimizer import PreconditionedSGLD, create_optimizer
 from leanhebo.transforms import IdentityScaler, TorchMinMaxScaler
 
-_STATE_SCHEMA_VERSION = 2
-
 
 class _MixedExactGP(gpytorch.models.ExactGP):  # type: ignore[misc]
     def __init__(
@@ -101,8 +99,6 @@ class ExactGPSurrogate:
         self.updates_since_full_refit = 0
         self.last_full_fit_observations = 0
         self.posterior_calls = 0
-        self.parameter_version = 0
-        self.posterior_cache_version = 0
 
     @property
     def fitted(self) -> bool:
@@ -114,12 +110,6 @@ class ExactGPSurrogate:
             raise RuntimeError("the GP has not been fitted")
         noise: torch.Tensor = self.likelihood.noise.detach().reshape(())
         return noise
-
-    @property
-    def input_scaler_version(self) -> int:
-        """Version of the observed-data input scaling used by the active GP."""
-
-        return self.input_scaler.version
 
     def _coerce_inputs(
         self, continuous: torch.Tensor, categorical: torch.Tensor
@@ -197,7 +187,6 @@ class ExactGPSurrogate:
             )
             if fallback_reason is None:
                 self.transform_version = transform_version
-                self.posterior_cache_version += 1
                 report = FitReport(
                     kind="fantasy_update",
                     observations=targets.numel(),
@@ -219,7 +208,6 @@ class ExactGPSurrogate:
                 self.diagnostics.increment("gp.fantasy_fallback")
                 self.diagnostics.increment(f"gp.fantasy_fallback.{fallback_reason}")
 
-        previous_input_scaler_version = self.input_scaler_version
         self.input_scaler.fit(continuous)
         continuous = self.input_scaler.transform(continuous).contiguous()
 
@@ -257,9 +245,6 @@ class ExactGPSurrogate:
             elif isinstance(self.optimizer, PreconditionedSGLD):
                 self.optimizer.set_observation_count(targets.numel())
 
-        self.posterior_cache_version += 1
-        if previous_input_scaler_version and self.diagnostics is not None:
-            self.diagnostics.increment("gp.input_transform_invalidations")
         if transform_changed and self.diagnostics is not None:
             self.diagnostics.increment("gp.transform_invalidations")
         report = self._optimize(kind, steps)
@@ -271,7 +256,6 @@ class ExactGPSurrogate:
         else:
             self.update_count += 1
             self.updates_since_full_refit += 1
-        self.parameter_version += int(report.completed_steps > 0)
         if self.diagnostics is not None:
             self.diagnostics.add_fit_report(report)
             self.diagnostics.increment(f"gp.{kind}")
@@ -381,11 +365,7 @@ class ExactGPSurrogate:
         self.train_targets = targets
         optimizer = self._create_optimizer()
         if self.config.reuse_optimizer_state and optimizer_state is not None:
-            try:
-                optimizer.load_state_dict(dict(optimizer_state))
-            except (KeyError, TypeError, ValueError, RuntimeError):
-                if self.diagnostics is not None:
-                    self.diagnostics.increment("gp.optimizer_state_incompatible")
+            optimizer.load_state_dict(dict(optimizer_state))
         if isinstance(optimizer, PreconditionedSGLD):
             optimizer.set_observation_count(targets.numel())
         self.optimizer = optimizer
@@ -441,18 +421,14 @@ class ExactGPSurrogate:
             variance = self.train_targets.var(unbiased=False).clamp_min(torch.finfo(self.dtype).eps)
             model.covar_module.outputscale = variance
         if retain_model_state is not None:
-            model.load_state_dict(retain_model_state, strict=False)
+            model.load_state_dict(retain_model_state)
         if retain_likelihood_state is not None:
-            likelihood.load_state_dict(retain_likelihood_state, strict=False)
+            likelihood.load_state_dict(retain_likelihood_state)
         self.model = model
         self.likelihood = likelihood
         optimizer = self._create_optimizer()
         if retain_optimizer_state is not None:
-            try:
-                optimizer.load_state_dict(dict(retain_optimizer_state))
-            except (KeyError, TypeError, ValueError, RuntimeError):
-                if self.diagnostics is not None:
-                    self.diagnostics.increment("gp.optimizer_state_incompatible")
+            optimizer.load_state_dict(dict(retain_optimizer_state))
         if isinstance(optimizer, PreconditionedSGLD):
             # A retained optimizer may come from a smaller training set.
             optimizer.set_observation_count(self.train_targets.numel())
@@ -659,10 +635,6 @@ class ExactGPSurrogate:
 
     def state_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": _STATE_SCHEMA_VERSION,
-            "input_scaler_kind": (
-                "minmax" if isinstance(self.input_scaler, TorchMinMaxScaler) else "identity"
-            ),
             "input_scaler": self.input_scaler.state_dict(),
             "model": None if self.model is None else self.model.state_dict(),
             "likelihood": (None if self.likelihood is None else self.likelihood.state_dict()),
@@ -671,30 +643,19 @@ class ExactGPSurrogate:
             "train_categorical": self.train_categorical,
             "train_targets": self.train_targets,
             "transform_version": self.transform_version,
-            "fit_count": self.fit_count,
-            "update_count": self.update_count,
-            "full_refit_count": self.full_refit_count,
             "updates_since_full_refit": self.updates_since_full_refit,
             "last_full_fit_observations": self.last_full_fit_observations,
-            "posterior_calls": self.posterior_calls,
-            "parameter_version": self.parameter_version,
-            "posterior_cache_version": self.posterior_cache_version,
         }
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
-        if int(state.get("schema_version", -1)) != _STATE_SCHEMA_VERSION:
-            raise ValueError("unsupported exact-GP state schema")
-        expected_scaler_kind = "minmax" if self.num_continuous else "identity"
-        if state.get("input_scaler_kind") != expected_scaler_kind:
-            raise ValueError("exact-GP input scaler is incompatible with the model dimensions")
-        scaler_state = state.get("input_scaler")
+        scaler_state = state["input_scaler"]
         if not isinstance(scaler_state, Mapping):
             raise ValueError("exact-GP input scaler state is missing or malformed")
         self.input_scaler.load_state_dict(dict(scaler_state))
         self.input_scaler.to(device=self.device, dtype=self.dtype)
-        train_continuous = state.get("train_continuous")
-        train_categorical = state.get("train_categorical")
-        train_targets = state.get("train_targets")
+        train_continuous = state["train_continuous"]
+        train_categorical = state["train_categorical"]
+        train_targets = state["train_targets"]
         if train_continuous is not None:
             assert train_categorical is not None and train_targets is not None
             self.train_continuous = torch.as_tensor(
@@ -707,23 +668,17 @@ class ExactGPSurrogate:
                 train_targets, device=self.device, dtype=self.dtype
             )
             self._construct_model(
-                retain_model_state=state.get("model"),
-                retain_likelihood_state=state.get("likelihood"),
-                retain_optimizer_state=state.get("optimizer"),
+                retain_model_state=state["model"],
+                retain_likelihood_state=state["likelihood"],
+                retain_optimizer_state=state["optimizer"],
                 initialize_kernel=False,
             )
             assert self.model is not None and self.likelihood is not None
             self.model.eval()
             self.likelihood.eval()
         self.transform_version = int(state["transform_version"])
-        self.fit_count = int(state["fit_count"])
-        self.update_count = int(state["update_count"])
-        self.full_refit_count = int(state["full_refit_count"])
-        self.updates_since_full_refit = int(state.get("updates_since_full_refit", 0))
+        self.updates_since_full_refit = int(state["updates_since_full_refit"])
         self.last_full_fit_observations = int(state["last_full_fit_observations"])
-        self.posterior_calls = int(state["posterior_calls"])
-        self.parameter_version = int(state["parameter_version"])
-        self.posterior_cache_version = int(state["posterior_cache_version"])
 
 
 def _looks_numerical(error: RuntimeError) -> bool:

@@ -18,10 +18,8 @@ class RuntimeConfig:
     device: str = "cpu"
     dtype: Literal["float32", "float64"] = "float32"
     seed: int | None = None
-    deterministic: bool = False
     acquisition_batch_size: int | None = 4096
     synchronize_device_for_timing: bool = True
-    enable_torch_compile: bool = False
 
     def __post_init__(self) -> None:
         if not self.device:
@@ -164,7 +162,6 @@ class AcquisitionConfig:
     delta: float = 0.01
     kappa: float | None = None
     stochastic: bool = True
-    posterior_cache: bool = True
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.epsilon) or self.epsilon < 0:
@@ -190,7 +187,6 @@ class SearchConfig:
     tournament_size: int = 2
     eliminate_duplicates: bool = True
     reuse_previous_population: bool = False
-    keep_history: bool = False
     seed: int | None = None
 
     def __post_init__(self) -> None:
@@ -241,6 +237,19 @@ class LeanHEBOConfig:
         """Reconstruct a configuration from :meth:`to_dict` output."""
 
         root = dict(value)
+        known_fields = {
+            "random_samples",
+            "nonfinite_policy",
+            "runtime",
+            "gp",
+            "warp",
+            "acquisition",
+            "search",
+        }
+        unknown = set(root) - known_fields
+        if unknown:
+            names = ", ".join(sorted(repr(name) for name in unknown))
+            raise ValueError(f"unknown LeanHEBOConfig field(s): {names}")
         return cls(
             random_samples=root.get("random_samples"),
             nonfinite_policy=root.get("nonfinite_policy", "drop"),

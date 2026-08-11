@@ -60,7 +60,7 @@ def _parse_args() -> argparse.Namespace:
         "--model-lifecycle",
         choices=("cold", "persistent"),
         default="persistent",
-        help="upstream-hebo requires cold; persistent is LeanHEBO's reuse lane",
+        help="upstream-hebo requires cold; persistent enables LeanHEBO model reuse",
     )
     parser.add_argument("--torch-threads", type=int, default=1)
     parser.add_argument("--device", default="cpu")

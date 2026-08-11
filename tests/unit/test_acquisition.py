@@ -8,8 +8,6 @@ from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator, PosteriorSta
 
 
 class _CountingPosterior:
-    posterior_cache_version = 0
-
     def __init__(self) -> None:
         self.calls = 0
 
@@ -22,30 +20,14 @@ class _CountingPosterior:
         return mean, torch.full_like(mean, 0.25), mean.new_tensor(0.01)
 
 
-def test_posterior_is_evaluated_once_per_chunk_and_cached() -> None:
+def test_posterior_is_evaluated_once_per_chunk() -> None:
     provider = _CountingPosterior()
-    evaluator = PosteriorEvaluator(provider, batch_size=4, cache=True)
+    evaluator = PosteriorEvaluator(provider, batch_size=4)
     continuous = torch.arange(21, dtype=torch.float32).reshape(7, 3)
     categorical = torch.empty((7, 0), dtype=torch.long)
-    first = evaluator.evaluate(continuous, categorical)
-    second = evaluator.evaluate(continuous, categorical)
+    result = evaluator.evaluate(continuous, categorical)
     assert provider.calls == 2
-    assert first is second
-    assert first.mean.shape == (7,)
-
-
-def test_posterior_cache_distinguishes_views_with_shared_storage() -> None:
-    provider = _CountingPosterior()
-    evaluator = PosteriorEvaluator(provider, batch_size=None, cache=True)
-    base = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    categorical = torch.empty((2, 0), dtype=torch.long)
-
-    rows = evaluator.evaluate(base, categorical)
-    columns = evaluator.evaluate(base.mT, categorical)
-
-    assert provider.calls == 2
-    torch.testing.assert_close(rows.mean, torch.tensor([3.0, 7.0]))
-    torch.testing.assert_close(columns.mean, torch.tensor([4.0, 6.0]))
+    assert result.mean.shape == (7,)
 
 
 def test_empty_posterior_with_unbounded_chunk_size_is_well_defined() -> None:
@@ -65,7 +47,7 @@ def test_mace_is_finite_and_reproducible_with_dedicated_generator() -> None:
 
     def evaluate(seed: int) -> torch.Tensor:
         provider = _CountingPosterior()
-        posterior = PosteriorEvaluator(provider, batch_size=None, cache=False)
+        posterior = PosteriorEvaluator(provider, batch_size=None)
         mace = MACEEvaluator(
             posterior,
             best_y=0.2,

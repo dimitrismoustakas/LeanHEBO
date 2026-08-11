@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -22,7 +23,7 @@ from leanhebo.config import (
 from leanhebo.data import CandidateBatch, EncodedBatch
 from leanhebo.errors import NumericalError, SearchSpaceExhaustedError
 from leanhebo.gp import ExactGPSurrogate, FitReport
-from leanhebo.space import Bool, Categorical, CompiledSpace, Float, Integer, Space
+from leanhebo.space import Bool, Categorical, CompiledSpace, FixedInput, Float, Integer, Space
 
 
 def _space() -> Space:
@@ -88,7 +89,7 @@ def test_optimizer_observes_its_candidate_batch_without_reencoding(
 
     monkeypatch.setattr(CompiledSpace, "encode", fail_encode)
     assert optimizer.observe(candidates, outcomes) == len(candidates)
-    stored = optimizer.store.encoded_chunks[0]
+    stored = optimizer.store.materialize()
     assert stored.continuous.data_ptr() != candidates.continuous.data_ptr()
     assert stored.categorical.data_ptr() != candidates.categorical.data_ptr()
 
@@ -96,10 +97,13 @@ def test_optimizer_observes_its_candidate_batch_without_reencoding(
     candidates.categorical.zero_()
     outcomes.add_(10)
 
-    assert torch.equal(stored.continuous, expected_continuous)
-    assert torch.equal(stored.categorical, expected_categorical)
-    assert torch.equal(optimizer.store.y_chunks[0], expected_outcomes)
-    assert optimizer.store.contains(EncodedBatch(expected_continuous, expected_categorical)).all()
+    actual = optimizer.store.materialize()
+    assert torch.equal(actual.continuous, expected_continuous)
+    assert torch.equal(actual.categorical, expected_categorical)
+    assert torch.equal(actual.y, expected_outcomes)
+    assert not optimizer.store.unique_mask(
+        EncodedBatch(expected_continuous, expected_categorical)
+    ).any()
 
 
 def test_finite_space_exhaustion_never_returns_duplicate_candidates() -> None:
@@ -114,12 +118,61 @@ def test_finite_space_exhaustion_never_returns_duplicate_candidates() -> None:
     assert optimizer.diagnostics.counters["suggest.uniqueness_exhausted"] == 1
 
 
-def test_integrated_mace_evaluates_each_candidate_chunk_once(
+def test_finite_context_completion_finds_the_last_unseen_integer_combination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     optimizer = LeanHEBO(
+        Space(
+            Integer("stepped", 2, 4, step=2),
+            Integer("logarithmic", 1, 2, log=True, base=2),
+            Integer("exponent", 1, 2, exponent=True, base=2),
+            Float("fixed_float", -1.0, 1.0),
+            Categorical("context", ("a", "b")),
+            Bool("flag"),
+        ),
+        config=LeanHEBOConfig(
+            random_samples=9,
+            runtime=RuntimeConfig(seed=5),
+        ),
+    )
+    records = [
+        {
+            "stepped": stepped,
+            "logarithmic": logarithmic,
+            "exponent": exponent,
+            "fixed_float": 0.25,
+            "context": "b",
+            "flag": True,
+        }
+        for stepped in (2, 4)
+        for logarithmic in (1, 2)
+        for exponent in (1, 2)
+    ]
+    observed = optimizer.space.decode(optimizer.space.encode(records[:-1]))
+    optimizer.observe(observed, torch.arange(7, dtype=optimizer.dtype))
+
+    def repeated_observed_draw(count: int, fixed: FixedInput | None) -> CandidateBatch:
+        encoded = optimizer.space.encode([records[0]] * count).to(
+            optimizer.device,
+            dtype=optimizer.dtype,
+        )
+        return optimizer.space.decode(encoded, fixed=fixed)
+
+    monkeypatch.setattr(optimizer, "_draw_sobol", repeated_observed_draw)
+
+    assert optimizer.suggest(
+        1,
+        fix_input={"fixed_float": 0.25, "context": "b", "flag": True},
+    ).to_records() == [records[-1]]
+
+
+def test_integrated_mace_evaluates_each_candidate_chunk_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _config(acquisition_batch_size=3, generations=1)
+    optimizer = LeanHEBO(
         _space(),
-        config=_config(acquisition_batch_size=3, generations=2),
+        config=replace(base, search=replace(base.search, population_size=4)),
     )
     initial = optimizer.suggest(3)
     optimizer.observe(initial, _outcomes(initial))
@@ -145,7 +198,7 @@ def test_integrated_mace_evaluates_each_candidate_chunk_once(
     assert len(events) >= optimizer.config.search.generations + 2
     assert events[0] == (1, 1)  # contextual incumbent
     search_events = events[1 : optimizer.config.search.generations + 2]
-    assert [count for count, _ in search_events] == [8, 8, 8]
+    assert [count for count, _ in search_events] == [4, 4]
     for candidate_count, posterior_calls in events:
         assert posterior_calls == math.ceil(candidate_count / 3)
     assert optimizer.surrogate.posterior_calls == sum(calls for _, calls in events)
@@ -327,6 +380,26 @@ def test_cpu_dtype_propagates_through_store_gp_search_and_candidates(
     assert optimizer.last_search is not None
     assert optimizer.last_search.population.dtype == torch_dtype
     assert optimizer.last_search.objectives.dtype == torch_dtype
+    assert optimizer._previous_population is None
+
+
+def test_reused_search_population_does_not_alias_last_search() -> None:
+    base = _config(generations=0)
+    config = replace(
+        base,
+        search=replace(base.search, reuse_previous_population=True),
+    )
+    optimizer = LeanHEBO(_space(), config=config)
+    initial = optimizer.suggest(3)
+    optimizer.observe(initial, _outcomes(initial))
+    optimizer.suggest(1)
+    assert optimizer.last_search is not None
+    assert optimizer._previous_population is not None
+    expected = optimizer._previous_population.clone()
+
+    optimizer.last_search.population.add_(123)
+
+    torch.testing.assert_close(optimizer._previous_population, expected)
 
 
 def test_checkpoint_after_observe_preserves_stale_model_continuation(
@@ -338,8 +411,7 @@ def test_checkpoint_after_observe_preserves_stale_model_continuation(
     first_model_batch = optimizer.suggest(2)
     optimizer.observe(first_model_batch, _outcomes(first_model_batch))
     assert optimizer.surrogate is not None
-    state = optimizer.state_dict()
-    assert state["model_observation_version"] != state["observation_version"]
+    assert optimizer._model_observation_version != optimizer.store.observation_version
 
     checkpoint = tmp_path / "stale-model.leanhebo"
     optimizer.save(checkpoint)
@@ -351,6 +423,5 @@ def test_checkpoint_after_observe_preserves_stale_model_continuation(
     assert torch.equal(actual.categorical, expected.categorical)
     assert actual.to_records() == expected.to_records()
     assert restored.surrogate is not None
-    assert restored.surrogate.update_count == optimizer.surrogate.update_count
     assert restored.surrogate.train_targets is not None
     assert restored.surrogate.train_targets.shape == (5,)

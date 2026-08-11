@@ -65,10 +65,7 @@ class RandomStreams:
         if not isinstance(sobol_seed, int):
             raise TypeError("invalid Sobol seed state")
         acquisition = state["acquisition"]
-        # States written before the model stream was separated used the search
-        # stream for both responsibilities.  Loading that state into both streams
-        # is the closest safe, deterministic migration.
-        model = state.get("model", state["search"])
+        model = state["model"]
         search = state["search"]
         selection = state["selection"]
         if not all(

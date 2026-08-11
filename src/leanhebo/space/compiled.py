@@ -10,9 +10,7 @@ import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import IntEnum
 from numbers import Real
-from types import MappingProxyType
 from typing import Literal, TypeAlias, cast
 
 import torch
@@ -23,18 +21,6 @@ from leanhebo.errors import SpaceMismatchError
 from leanhebo.space.parameters import Bool, Categorical, Float, Integer, ParameterLike
 
 ExternalBatch: TypeAlias = object
-
-
-class DenseKind(IntEnum):
-    """Stable type codes for dense search coordinates."""
-
-    FLOAT = 0
-    INTEGER = 1
-    STEPPED_INTEGER = 2
-    POWER_INTEGER = 3
-    EXPONENT_INTEGER = 4
-    CATEGORICAL = 5
-    BOOLEAN = 6
 
 
 def _dtype_from_value(dtype: torch.dtype | str) -> torch.dtype:
@@ -92,10 +78,6 @@ class FixedInput:
     def __len__(self) -> int:
         return self.continuous_indices.numel() + self.categorical_indices.numel()
 
-    @property
-    def names(self) -> tuple[str, ...]:
-        return tuple(name for name, _ in self.decoded_values)
-
     def to(
         self,
         device: torch.device | str | None = None,
@@ -123,37 +105,10 @@ class CompiledSpace:
     parameters: tuple[ParameterLike, ...]
     dtype: torch.dtype = torch.float32
     names: tuple[str, ...] = field(init=False)
-    continuous_names: tuple[str, ...] = field(init=False)
-    categorical_names: tuple[str, ...] = field(init=False)
-    dense_names: tuple[str, ...] = field(init=False)
-    continuous_indices: torch.Tensor = field(init=False, repr=False)
-    categorical_indices: torch.Tensor = field(init=False, repr=False)
-    public_to_dense_indices: torch.Tensor = field(init=False, repr=False)
-    dense_to_public_indices: torch.Tensor = field(init=False, repr=False)
-    output_types: tuple[tuple[type[object], ...], ...] = field(init=False, repr=False)
-    category_to_code: Mapping[str, Mapping[object, int]] = field(init=False, repr=False)
-    code_to_category: Mapping[str, tuple[object, ...]] = field(init=False, repr=False)
     fingerprint: str = field(init=False)
-    continuous_lower_bounds: torch.Tensor = field(init=False, repr=False)
-    continuous_upper_bounds: torch.Tensor = field(init=False, repr=False)
-    categorical_lower_bounds: torch.Tensor = field(init=False, repr=False)
-    categorical_upper_bounds: torch.Tensor = field(init=False, repr=False)
     dense_lower_bounds: torch.Tensor = field(init=False, repr=False)
     dense_upper_bounds: torch.Tensor = field(init=False, repr=False)
-    dense_kind_codes: torch.Tensor = field(init=False, repr=False)
-    real_mask: torch.Tensor = field(init=False, repr=False)
-    continuous_mask: torch.Tensor = field(init=False, repr=False)
-    numeric_mask: torch.Tensor = field(init=False, repr=False)
-    integer_mask: torch.Tensor = field(init=False, repr=False)
-    search_integer_mask: torch.Tensor = field(init=False, repr=False)
-    search_continuous_mask: torch.Tensor = field(init=False, repr=False)
-    search_steps: torch.Tensor = field(init=False, repr=False)
-    stepped_integer_mask: torch.Tensor = field(init=False, repr=False)
-    power_integer_mask: torch.Tensor = field(init=False, repr=False)
-    exponent_integer_mask: torch.Tensor = field(init=False, repr=False)
     categorical_mask: torch.Tensor = field(init=False, repr=False)
-    boolean_mask: torch.Tensor = field(init=False, repr=False)
-    discrete_mask: torch.Tensor = field(init=False, repr=False)
     rounding_mask: torch.Tensor = field(init=False, repr=False)
     _continuous_parameters: tuple[Float | Integer, ...] = field(init=False, repr=False)
     _categorical_parameters: tuple[Categorical | Bool, ...] = field(init=False, repr=False)
@@ -172,41 +127,7 @@ class CompiledSpace:
         dtype = _dtype_from_value(self.dtype)
         continuous = tuple(parameter for parameter in parameters if not parameter.is_categorical)
         categorical = tuple(parameter for parameter in parameters if parameter.is_categorical)
-        continuous_names = tuple(parameter.name for parameter in continuous)
-        categorical_names = tuple(parameter.name for parameter in categorical)
         dense_parameters = continuous + categorical
-        dense_names = continuous_names + categorical_names
-        name_to_dense = {name: index for index, name in enumerate(dense_names)}
-        public_to_dense = torch.tensor([name_to_dense[name] for name in names], dtype=torch.int64)
-        dense_to_public = torch.empty(len(parameters), dtype=torch.int64)
-        dense_to_public[public_to_dense] = torch.arange(len(parameters), dtype=torch.int64)
-        continuous_indices = torch.tensor(
-            [index for index, parameter in enumerate(parameters) if not parameter.is_categorical],
-            dtype=torch.int64,
-        )
-        categorical_indices = torch.tensor(
-            [index for index, parameter in enumerate(parameters) if parameter.is_categorical],
-            dtype=torch.int64,
-        )
-        output_types: list[tuple[type[object], ...]] = []
-        category_to_code: dict[str, Mapping[object, int]] = {}
-        code_to_category: dict[str, tuple[object, ...]] = {}
-        for parameter in parameters:
-            if isinstance(parameter, Float):
-                output_types.append((float,))
-            elif isinstance(parameter, Integer):
-                output_types.append((int,))
-            elif isinstance(parameter, Bool):
-                output_types.append((bool,))
-                category_to_code[parameter.name] = MappingProxyType({False: 0, True: 1})
-                code_to_category[parameter.name] = (False, True)
-            else:
-                unique_types = tuple(dict.fromkeys(type(value) for value in parameter.categories))
-                output_types.append(unique_types)
-                category_to_code[parameter.name] = MappingProxyType(
-                    {value: code for code, value in enumerate(parameter.categories)}
-                )
-                code_to_category[parameter.name] = parameter.categories
         continuous_bounds = [parameter.optimization_bounds for parameter in continuous]
         categorical_bounds = [parameter.optimization_bounds for parameter in categorical]
         continuous_lower = torch.tensor([bounds[0] for bounds in continuous_bounds], dtype=dtype)
@@ -217,27 +138,17 @@ class CompiledSpace:
         categorical_upper = torch.tensor(
             [int(bounds[1]) for bounds in categorical_bounds], dtype=torch.int64
         )
-        kind_codes = torch.tensor(
-            [self._kind_for(parameter) for parameter in dense_parameters], dtype=torch.int8
+        categorical_mask = torch.tensor(
+            [parameter.is_categorical for parameter in dense_parameters], dtype=torch.bool
         )
-        numeric_mask = torch.zeros(len(dense_parameters), dtype=torch.bool)
-        numeric_mask[: len(continuous)] = True
-        real_mask = kind_codes == DenseKind.FLOAT
-        integer_mask = (
-            (kind_codes == DenseKind.INTEGER)
-            | (kind_codes == DenseKind.STEPPED_INTEGER)
-            | (kind_codes == DenseKind.POWER_INTEGER)
-            | (kind_codes == DenseKind.EXPONENT_INTEGER)
+        rounding_mask = torch.tensor(
+            [
+                parameter.is_categorical
+                or (isinstance(parameter, Integer) and parameter.mode != "power")
+                for parameter in dense_parameters
+            ],
+            dtype=torch.bool,
         )
-        categorical_mask = (kind_codes == DenseKind.CATEGORICAL) | (kind_codes == DenseKind.BOOLEAN)
-        rounding_mask = (
-            (kind_codes == DenseKind.INTEGER)
-            | (kind_codes == DenseKind.STEPPED_INTEGER)
-            | (kind_codes == DenseKind.EXPONENT_INTEGER)
-            | categorical_mask
-        )
-        search_integer_mask = rounding_mask & ~categorical_mask
-        search_continuous_mask = ~(search_integer_mask | categorical_mask)
         positions: dict[str, tuple[Literal["continuous", "categorical"], int]] = {}
         for index, parameter in enumerate(continuous):
             positions[parameter.name] = ("continuous", index)
@@ -246,32 +157,10 @@ class CompiledSpace:
         object.__setattr__(self, "parameters", parameters)
         object.__setattr__(self, "dtype", dtype)
         object.__setattr__(self, "names", names)
-        object.__setattr__(self, "continuous_names", continuous_names)
-        object.__setattr__(self, "categorical_names", categorical_names)
-        object.__setattr__(self, "dense_names", dense_names)
-        object.__setattr__(self, "continuous_indices", continuous_indices)
-        object.__setattr__(self, "categorical_indices", categorical_indices)
-        object.__setattr__(self, "public_to_dense_indices", public_to_dense)
-        object.__setattr__(self, "dense_to_public_indices", dense_to_public)
-        object.__setattr__(self, "output_types", tuple(output_types))
-        object.__setattr__(
-            self,
-            "category_to_code",
-            MappingProxyType(category_to_code),
-        )
-        object.__setattr__(
-            self,
-            "code_to_category",
-            MappingProxyType(code_to_category),
-        )
         object.__setattr__(self, "fingerprint", _fingerprint(parameters))
         object.__setattr__(self, "_continuous_parameters", continuous)
         object.__setattr__(self, "_categorical_parameters", categorical)
         object.__setattr__(self, "_name_positions", positions)
-        object.__setattr__(self, "continuous_lower_bounds", continuous_lower)
-        object.__setattr__(self, "continuous_upper_bounds", continuous_upper)
-        object.__setattr__(self, "categorical_lower_bounds", categorical_lower)
-        object.__setattr__(self, "categorical_upper_bounds", categorical_upper)
         object.__setattr__(
             self,
             "dense_lower_bounds",
@@ -282,36 +171,8 @@ class CompiledSpace:
             "dense_upper_bounds",
             torch.cat((continuous_upper, categorical_upper.to(dtype=dtype))),
         )
-        object.__setattr__(self, "dense_kind_codes", kind_codes)
-        object.__setattr__(self, "real_mask", real_mask)
-        object.__setattr__(self, "continuous_mask", real_mask)
-        object.__setattr__(self, "numeric_mask", numeric_mask)
-        object.__setattr__(self, "integer_mask", integer_mask)
-        object.__setattr__(self, "search_integer_mask", search_integer_mask)
-        object.__setattr__(self, "search_continuous_mask", search_continuous_mask)
-        object.__setattr__(self, "search_steps", search_integer_mask.to(dtype=dtype))
-        object.__setattr__(self, "stepped_integer_mask", kind_codes == DenseKind.STEPPED_INTEGER)
-        object.__setattr__(self, "power_integer_mask", kind_codes == DenseKind.POWER_INTEGER)
-        object.__setattr__(self, "exponent_integer_mask", kind_codes == DenseKind.EXPONENT_INTEGER)
         object.__setattr__(self, "categorical_mask", categorical_mask)
-        object.__setattr__(self, "boolean_mask", kind_codes == DenseKind.BOOLEAN)
-        object.__setattr__(self, "discrete_mask", integer_mask | categorical_mask)
         object.__setattr__(self, "rounding_mask", rounding_mask)
-
-    @staticmethod
-    def _kind_for(parameter: ParameterLike) -> DenseKind:
-        if isinstance(parameter, Float):
-            return DenseKind.FLOAT
-        if isinstance(parameter, Integer):
-            return {
-                "linear": DenseKind.INTEGER,
-                "step": DenseKind.STEPPED_INTEGER,
-                "power": DenseKind.POWER_INTEGER,
-                "exponent": DenseKind.EXPONENT_INTEGER,
-            }[parameter.mode]
-        if isinstance(parameter, Bool):
-            return DenseKind.BOOLEAN
-        return DenseKind.CATEGORICAL
 
     def __len__(self) -> int:
         return len(self.parameters)
@@ -337,18 +198,6 @@ class CompiledSpace:
     @property
     def dense_dimension(self) -> int:
         return len(self.parameters)
-
-    @property
-    def opt_lb(self) -> torch.Tensor:
-        """Compatibility alias for dense lower bounds."""
-
-        return self.dense_lower_bounds
-
-    @property
-    def opt_ub(self) -> torch.Tensor:
-        """Compatibility alias for dense upper bounds."""
-
-        return self.dense_upper_bounds
 
     def to_spec(self) -> list[dict[str, object]]:
         return [parameter.to_spec() for parameter in self.parameters]
@@ -510,8 +359,6 @@ class CompiledSpace:
         fixed_input = self._coerce_fixed(fixed)
         return self.apply_fixed(encoded, fixed_input) if fixed_input is not None else encoded
 
-    dense_to_encoded = encoded_from_dense
-
     def candidate_from_dense(
         self,
         dense: torch.Tensor,
@@ -522,16 +369,6 @@ class CompiledSpace:
         fixed_input = self._coerce_fixed(fixed)
         encoded = self.encoded_from_dense(dense, repair=repair, fixed=fixed_input)
         return self.decode(encoded, fixed=fixed_input)
-
-    from_dense = candidate_from_dense
-
-    def repair_dense(
-        self,
-        dense: torch.Tensor,
-        *,
-        fixed: FixedInput | Mapping[str, object] | None = None,
-    ) -> torch.Tensor:
-        return self.to_dense(self.encoded_from_dense(dense, repair=True, fixed=fixed))
 
     def compile_fixed(self, values: Mapping[str, object] | None = None) -> FixedInput:
         """Validate and encode a reusable contextual fixed-input assignment."""
@@ -576,46 +413,6 @@ class CompiledSpace:
             self.fingerprint,
             tuple(decoded_values),
         )
-
-    def fixed_mask(self, fixed: FixedInput | Mapping[str, object] | None) -> torch.Tensor:
-        fixed_input = self._coerce_fixed(fixed)
-        if fixed_input is None:
-            return torch.zeros(self.dense_dimension, dtype=torch.bool)
-        return fixed_input.dense_mask
-
-    def dense_fixed_values(
-        self,
-        fixed: FixedInput | Mapping[str, object] | None,
-        *,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype | None = None,
-    ) -> torch.Tensor:
-        """Build a full dense vector suitable for search repair metadata.
-
-        Non-fixed positions contain their lower bounds; consumers should pair
-        the result with :meth:`fixed_mask` and ignore those positions.
-        """
-
-        fixed_input = self._coerce_fixed(fixed)
-        target_dtype = self.dtype if dtype is None else dtype
-        if not target_dtype.is_floating_point:
-            raise TypeError("dense fixed values require a floating dtype")
-        values = self.dense_lower_bounds.to(device=device, dtype=target_dtype).clone()
-        if fixed_input is None:
-            return values
-        if fixed_input.continuous_indices.numel():
-            indices = fixed_input.continuous_indices.to(device=values.device)
-            fixed_values = fixed_input.continuous_values.to(
-                device=values.device, dtype=target_dtype
-            )
-            values[indices] = fixed_values
-        if fixed_input.categorical_indices.numel():
-            indices = fixed_input.categorical_indices.to(device=values.device)
-            fixed_values = fixed_input.categorical_values.to(
-                device=values.device, dtype=target_dtype
-            )
-            values[self.n_continuous + indices] = fixed_values
-        return values
 
     def _coerce_fixed(self, fixed: FixedInput | Mapping[str, object] | None) -> FixedInput | None:
         if fixed is None:
@@ -693,8 +490,6 @@ class CompiledSpace:
         fixed_input = self._coerce_fixed(fixed)
         return self.candidate_from_dense(dense, fixed=fixed_input)
 
-    sobol = sample
-
     def canonical_key_tensor(self, value: EncodedBatch | CandidateBatch) -> torch.Tensor:
         """Return exact int64 key components in public schema order on CPU."""
 
@@ -710,6 +505,7 @@ class CompiledSpace:
         for index, cont_parameter in enumerate(self._continuous_parameters):
             column = continuous[:, index].contiguous()
             if isinstance(cont_parameter, Float):
+                column = torch.where(column == 0, torch.zeros_like(column), column)
                 bits = (
                     column.view(torch.int32).to(torch.int64)
                     if self.dtype == torch.float32
@@ -728,5 +524,3 @@ class CompiledSpace:
     def canonical_keys(self, value: EncodedBatch | CandidateBatch) -> tuple[tuple[int, ...], ...]:
         tensor = self.canonical_key_tensor(value)
         return tuple(tuple(int(component) for component in row) for row in tensor.tolist())
-
-    keys = canonical_keys

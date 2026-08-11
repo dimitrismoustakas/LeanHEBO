@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 
-"""Fixed-history suggestion latency with an auditable, matched work contract."""
+"""Fixed-history suggestion latency with identical declared work."""
 
 from __future__ import annotations
 

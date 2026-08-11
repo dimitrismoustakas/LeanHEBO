@@ -24,6 +24,11 @@ def test_configuration_round_trip() -> None:
     assert LeanHEBOConfig.from_dict(config.to_dict()) == config
 
 
+def test_unknown_top_level_configuration_field_is_rejected() -> None:
+    with pytest.raises(ValueError, match=r"unknown LeanHEBOConfig field.*'serach'"):
+        LeanHEBOConfig.from_dict({"serach": {}})
+
+
 @pytest.mark.parametrize(
     ("factory", "message"),
     [

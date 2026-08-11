@@ -1,5 +1,4 @@
 {
-  "schema_version": 1,
   "name": "upstream-hebo",
   "repository": "https://github.com/huawei-noah/HEBO.git",
   "commit": "ee6112d39d1a9e9703fecaf9057193e1ec9dae72",

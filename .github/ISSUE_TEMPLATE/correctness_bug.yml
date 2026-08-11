@@ -5,12 +5,12 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thank you for reporting a problem. For security issues, use a private security advisory instead.
+        Thank you for reporting a problem.
   - type: input
     id: version
     attributes:
       label: LeanHEBO version or commit
-      placeholder: "0.1.0 or full commit SHA"
+      placeholder: "PyPI version or full commit SHA"
     validations:
       required: true
   - type: textarea
@@ -52,6 +52,4 @@ body:
       label: Checks
       options:
         - label: I searched existing issues for this problem.
-          required: true
-        - label: This report does not disclose a security vulnerability.
           required: true
