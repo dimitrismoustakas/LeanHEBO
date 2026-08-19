@@ -84,8 +84,10 @@ class LeanHEBO:
 
     @property
     def random_samples(self) -> int:
+        if self.space.dense_dimension == 0:
+            return 1
         configured = self.config.random_samples
-        return max(2, 1 + len(self.space)) if configured is None else configured
+        return max(2, 1 + self.space.dense_dimension) if configured is None else configured
 
     @property
     def observations(self) -> int:
@@ -99,7 +101,9 @@ class LeanHEBO:
     def last_search(self) -> NSGA2Result | None:
         return self._last_search
 
-    def _new_sobol_engine(self) -> torch.quasirandom.SobolEngine:
+    def _new_sobol_engine(self) -> torch.quasirandom.SobolEngine | None:
+        if self.space.dense_dimension == 0:
+            return None
         return torch.quasirandom.SobolEngine(  # type: ignore[no-untyped-call]
             self.space.dense_dimension,
             scramble=True,
@@ -113,8 +117,11 @@ class LeanHEBO:
     ) -> CandidateBatch:
         if count < 0:
             raise ValueError("suggestion count cannot be negative")
-        unit = self._sobol.draw(count, dtype=self.dtype)
-        self._sobol_draw_count += count
+        if self._sobol is None:
+            unit = torch.empty((count, 0), dtype=self.dtype)
+        else:
+            unit = self._sobol.draw(count, dtype=self.dtype)
+            self._sobol_draw_count += count
         lower = self.space.dense_lower_bounds
         upper = self.space.dense_upper_bounds
         dense = lower + unit * (upper - lower)
@@ -141,6 +148,9 @@ class LeanHEBO:
             raise ValueError("n_suggestions must be positive")
         fixed = self._compile_fixed(fix_input)
         with self.diagnostics.phase("suggest.total"):
+            if self.space.dense_dimension == 0:
+                with self.diagnostics.phase("suggest.initial_sampling"):
+                    return self._fill_unique(None, n_suggestions, fixed)
             if len(self.store) < self.random_samples:
                 with self.diagnostics.phase("suggest.initial_sampling"):
                     return self._fill_unique(None, n_suggestions, fixed)
@@ -158,8 +168,7 @@ class LeanHEBO:
     def _make_surrogate(self) -> ExactGPSurrogate:
         category_sizes = tuple(
             round(parameter.optimization_bounds[1] - parameter.optimization_bounds[0]) + 1
-            for parameter in self.space.parameters
-            if parameter.is_categorical
+            for parameter in self.space.categorical_parameters
         )
         return ExactGPSurrogate(
             num_continuous=self.space.n_continuous,
@@ -539,7 +548,7 @@ class LeanHEBO:
     def refit(self) -> FitReport | None:
         """Run an explicit full GP refit now when model-based data are available."""
 
-        if len(self.store) < self.random_samples:
+        if self.space.dense_dimension == 0 or len(self.store) < self.random_samples:
             return None
         self._force_full_refit = True
         return self._ensure_model()
@@ -608,6 +617,7 @@ class LeanHEBO:
         self._sobol = self._new_sobol_engine()
         self._sobol_draw_count = int(state["sobol_draw_count"])
         if self._sobol_draw_count:
+            assert self._sobol is not None
             self._sobol.fast_forward(  # type: ignore[no-untyped-call]
                 self._sobol_draw_count
             )

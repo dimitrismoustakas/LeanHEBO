@@ -158,6 +158,43 @@ def test_discrete_initial_suggestions_are_independent_of_batching() -> None:
     assert sequential_optimizer._sobol_draw_count == batched_optimizer._sobol_draw_count == 8
 
 
+def test_fully_static_space_returns_its_only_point_then_exhausts() -> None:
+    optimizer = LeanHEBO(
+        Space(Integer("fold", 3, 3), Categorical("dataset", ("protein",))),
+        config=LeanHEBOConfig(runtime=RuntimeConfig(seed=1)),
+    )
+
+    assert optimizer.random_samples == 1
+    candidate = optimizer.suggest(1)
+    assert candidate.to_records() == [{"fold": 3, "dataset": "protein"}]
+    assert candidate.continuous.shape == (1, 0)
+    assert candidate.categorical.shape == (1, 0)
+    optimizer.observe(candidate, torch.tensor([0.0]))
+
+    with pytest.raises(SearchSpaceExhaustedError, match=r"only 0 unseen"):
+        optimizer.suggest(1)
+
+    assert optimizer.surrogate is None
+    assert optimizer.refit() is None
+
+
+def test_static_category_is_not_fitted_as_a_gp_embedding() -> None:
+    optimizer = LeanHEBO(
+        Space(Float("x", -1.0, 1.0), Categorical("dataset", ("protein",))),
+        config=_config(generations=0),
+    )
+    initial = optimizer.suggest(3)
+    optimizer.observe(initial, initial.continuous[:, 0].square())
+
+    candidate = optimizer.suggest(1)
+
+    assert candidate.to_records()[0]["dataset"] == "protein"
+    assert optimizer.surrogate is not None
+    assert optimizer.surrogate.category_sizes == ()
+    assert optimizer.surrogate.train_categorical is not None
+    assert optimizer.surrogate.train_categorical.shape == (3, 0)
+
+
 def test_finite_context_completion_finds_the_last_unseen_integer_combination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

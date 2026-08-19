@@ -23,6 +23,20 @@ from leanhebo.space.parameters import Bool, Categorical, Float, Integer, Paramet
 ExternalBatch: TypeAlias = object
 
 
+def _is_static(parameter: ParameterLike) -> bool:
+    return (isinstance(parameter, Integer) and parameter.low == parameter.high) or (
+        isinstance(parameter, Categorical) and len(parameter.categories) == 1
+    )
+
+
+def _static_value(parameter: ParameterLike) -> object:
+    if isinstance(parameter, Integer) and parameter.low == parameter.high:
+        return parameter.low
+    if isinstance(parameter, Categorical) and len(parameter.categories) == 1:
+        return parameter.categories[0]
+    raise ValueError(f"parameter {parameter.name!r} is not static")
+
+
 def _dtype_from_value(dtype: torch.dtype | str) -> torch.dtype:
     if isinstance(dtype, str):
         normalized = dtype.removeprefix("torch.")
@@ -112,6 +126,7 @@ class CompiledSpace:
     rounding_mask: torch.Tensor = field(init=False, repr=False)
     _continuous_parameters: tuple[Float | Integer, ...] = field(init=False, repr=False)
     _categorical_parameters: tuple[Categorical | Bool, ...] = field(init=False, repr=False)
+    _static_parameters: tuple[Integer | Categorical, ...] = field(init=False, repr=False)
     _name_positions: dict[str, tuple[Literal["continuous", "categorical"], int]] = field(
         init=False, repr=False, compare=False
     )
@@ -125,8 +140,10 @@ class CompiledSpace:
             duplicates = sorted({name for name in names if names.count(name) > 1})
             raise ValueError(f"duplicate parameter names: {duplicates}")
         dtype = _dtype_from_value(self.dtype)
-        continuous = tuple(parameter for parameter in parameters if not parameter.is_categorical)
-        categorical = tuple(parameter for parameter in parameters if parameter.is_categorical)
+        active = tuple(parameter for parameter in parameters if not _is_static(parameter))
+        continuous = tuple(parameter for parameter in active if not parameter.is_categorical)
+        categorical = tuple(parameter for parameter in active if parameter.is_categorical)
+        static = tuple(parameter for parameter in parameters if _is_static(parameter))
         dense_parameters = continuous + categorical
         continuous_bounds = [parameter.optimization_bounds for parameter in continuous]
         categorical_bounds = [parameter.optimization_bounds for parameter in categorical]
@@ -160,6 +177,7 @@ class CompiledSpace:
         object.__setattr__(self, "fingerprint", _fingerprint(parameters))
         object.__setattr__(self, "_continuous_parameters", continuous)
         object.__setattr__(self, "_categorical_parameters", categorical)
+        object.__setattr__(self, "_static_parameters", static)
         object.__setattr__(self, "_name_positions", positions)
         object.__setattr__(
             self,
@@ -196,8 +214,12 @@ class CompiledSpace:
         return len(self._categorical_parameters)
 
     @property
+    def categorical_parameters(self) -> tuple[Categorical | Bool, ...]:
+        return self._categorical_parameters
+
+    @property
     def dense_dimension(self) -> int:
-        return len(self.parameters)
+        return self.n_continuous + self.n_categorical
 
     def to_spec(self) -> list[dict[str, object]]:
         return [parameter.to_spec() for parameter in self.parameters]
@@ -214,6 +236,8 @@ class CompiledSpace:
             return value
         columns = columns_from_input(value, self.names)
         row_count = len(next(iter(columns.values())))
+        for parameter in self._static_parameters:
+            parameter.encode_values(columns[parameter.name], dtype=self.dtype)
         continuous_columns = [
             parameter.encode_values(columns[parameter.name], dtype=self.dtype)
             for parameter in self._continuous_parameters
@@ -251,7 +275,10 @@ class CompiledSpace:
             encoded = value
         self.validate_encoded(encoded)
         fixed_input = self._coerce_fixed(fixed)
-        columns: dict[str, tuple[object, ...]] = {}
+        columns: dict[str, tuple[object, ...]] = {
+            parameter.name: (_static_value(parameter),) * len(encoded)
+            for parameter in self._static_parameters
+        }
         for index, cont_parameter in enumerate(self._continuous_parameters):
             columns[cont_parameter.name] = cont_parameter.decode_values(
                 encoded.continuous[:, index]
@@ -268,11 +295,15 @@ class CompiledSpace:
         self._validate_shape(encoded)
         if not torch.isfinite(encoded.continuous).all():
             raise ValueError("encoded continuous coordinates must be finite")
+        continuous_lower = self.dense_lower_bounds[: self.n_continuous].to(device=encoded.device)
+        continuous_upper = self.dense_upper_bounds[: self.n_continuous].to(device=encoded.device)
+        if encoded.continuous.numel() and (
+            (encoded.continuous < continuous_lower).any()
+            or (encoded.continuous > continuous_upper).any()
+        ):
+            raise ValueError("encoded continuous values exceed their bounds")
         for index, cont_parameter in enumerate(self._continuous_parameters):
             values = encoded.continuous[:, index]
-            lower, upper = cont_parameter.optimization_bounds
-            if values.numel() and ((values < lower).any() or (values > upper).any()):
-                raise ValueError(f"encoded values for {cont_parameter.name!r} exceed its bounds")
             if (
                 cont_parameter.is_discrete_after_transform
                 and values.numel()
@@ -282,11 +313,17 @@ class CompiledSpace:
                     f"encoded values for discrete parameter {cont_parameter.name!r} "
                     "are not integral"
                 )
-        for index, cat_parameter in enumerate(self._categorical_parameters):
-            values = encoded.categorical[:, index]
-            lower, upper = cat_parameter.optimization_bounds
-            if values.numel() and ((values < int(lower)).any() or (values > int(upper)).any()):
-                raise ValueError(f"encoded values for {cat_parameter.name!r} exceed its code range")
+        categorical_lower = self.dense_lower_bounds[self.n_continuous :].to(
+            device=encoded.device, dtype=torch.int64
+        )
+        categorical_upper = self.dense_upper_bounds[self.n_continuous :].to(
+            device=encoded.device, dtype=torch.int64
+        )
+        if encoded.categorical.numel() and (
+            (encoded.categorical < categorical_lower).any()
+            or (encoded.categorical > categorical_upper).any()
+        ):
+            raise ValueError("encoded categorical values exceed their code ranges")
 
     def _validate_shape(self, encoded: EncodedBatch) -> None:
         if encoded.n_continuous != self.n_continuous:
@@ -326,29 +363,31 @@ class CompiledSpace:
             continuous = continuous.clone()
             categorical_values = categorical_values.clone()
             for index, cont_parameter in enumerate(self._continuous_parameters):
-                lower, upper = cont_parameter.optimization_bounds
+                lower = self.dense_lower_bounds[index].to(device=continuous.device)
+                upper = self.dense_upper_bounds[index].to(device=continuous.device)
                 column = continuous[:, index].clamp(lower, upper)
                 if (
                     isinstance(cont_parameter, Integer)
                     and cont_parameter.log
                     and not cont_parameter.exponent
                 ):
+                    log_low = math.log(cont_parameter.low)
+                    log_span = math.log(cont_parameter.high) - log_low
                     semantic = (
-                        torch.pow(
-                            torch.as_tensor(
-                                cont_parameter.base, dtype=column.dtype, device=column.device
-                            ),
-                            column,
-                        )
+                        torch.exp(log_low + column.to(torch.float64) * log_span)
                         .round()
                         .clamp(cont_parameter.low, cont_parameter.high)
                     )
-                    column = torch.log(semantic) / math.log(cont_parameter.base)
+                    column = cont_parameter._encode_log_values(semantic, dtype=column.dtype).clamp(
+                        lower, upper
+                    )
                 elif cont_parameter.is_discrete_after_transform:
                     column = column.round()
                 continuous[:, index] = column
-            for index, cat_parameter in enumerate(self._categorical_parameters):
-                lower, upper = cat_parameter.optimization_bounds
+            for index in range(self.n_categorical):
+                dense_index = self.n_continuous + index
+                lower = self.dense_lower_bounds[dense_index].to(device=categorical_values.device)
+                upper = self.dense_upper_bounds[dense_index].to(device=categorical_values.device)
                 categorical_values[:, index] = (
                     categorical_values[:, index].round().clamp(lower, upper)
                 )
@@ -388,8 +427,10 @@ class CompiledSpace:
             if name not in assignments:
                 continue
             parameter = by_name[name]
-            location, index = self._name_positions[name]
             encoded = parameter.encode_values([assignments[name]], dtype=self.dtype)
+            if _is_static(parameter):
+                continue
+            location, index = self._name_positions[name]
             if location == "continuous":
                 continuous_indices.append(index)
                 continuous_values.append(float(encoded.item()))
@@ -467,8 +508,8 @@ class CompiledSpace:
                     device=random_device,
                 ).item()
             )
-        if count == 0:
-            unit = torch.empty((0, self.dense_dimension), dtype=self.dtype)
+        if count == 0 or self.dense_dimension == 0:
+            unit = torch.empty((count, self.dense_dimension), dtype=self.dtype)
         else:
             engine = torch.quasirandom.SobolEngine(  # type: ignore[no-untyped-call]
                 self.dense_dimension, scramble=scramble, seed=seed
@@ -502,6 +543,13 @@ class CompiledSpace:
         continuous = encoded.continuous.detach().to(device="cpu", dtype=self.dtype)
         categorical = encoded.categorical.detach().to(device="cpu")
         columns: dict[str, torch.Tensor] = {}
+        for parameter in self._static_parameters:
+            if isinstance(parameter, Integer):
+                columns[parameter.name] = torch.full(
+                    (len(encoded),), parameter.low, dtype=torch.int64
+                )
+            else:
+                columns[parameter.name] = torch.zeros(len(encoded), dtype=torch.int64)
         for index, cont_parameter in enumerate(self._continuous_parameters):
             column = continuous[:, index].contiguous()
             if isinstance(cont_parameter, Float):

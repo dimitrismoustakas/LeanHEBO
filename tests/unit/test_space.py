@@ -56,6 +56,52 @@ def test_log_boundaries_and_numpy_scalars_encode_cleanly() -> None:
     assert compiled.decode(encoded).to_records()[0]["category"] == 1
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_log_integer_codec_has_exact_endpoints_and_idempotent_repair(
+    dtype: torch.dtype,
+) -> None:
+    compiled = Space(Integer("batch_size", 16, 512, log=True)).compile(dtype=dtype)
+    encoded = compiled.encode([{"batch_size": 16}, {"batch_size": 512}])
+
+    assert torch.equal(encoded.continuous[:, 0], torch.tensor([0.0, 1.0], dtype=dtype))
+    compiled.validate_encoded(encoded)
+
+    raw = torch.tensor([[-1.0], [0.37], [2.0]], dtype=dtype)
+    repaired = compiled.encoded_from_dense(raw)
+    repaired_twice = compiled.encoded_from_dense(compiled.to_dense(repaired))
+    assert torch.equal(repaired.continuous, repaired_twice.continuous)
+    assert compiled.decode(repaired).to_records()[0]["batch_size"] == 16
+    assert compiled.decode(repaired).to_records()[-1]["batch_size"] == 512
+
+
+def test_float32_log_integer_encoding_preserves_semantic_round_trip() -> None:
+    compiled = Space(Integer("n", 8476, 825012, log=True)).compile(dtype=torch.float32)
+    encoded = compiled.encode([{"n": 617012}])
+
+    assert compiled.decode(encoded).to_records() == [{"n": 617012}]
+    repaired = compiled.encoded_from_dense(encoded.continuous)
+    repaired_twice = compiled.encoded_from_dense(repaired.continuous)
+    assert torch.equal(repaired.continuous, repaired_twice.continuous)
+
+
+def test_static_dimensions_are_absent_from_tensors_and_reinserted_on_decode() -> None:
+    compiled = Space(
+        Categorical("dataset", ("protein",)),
+        Integer("fold", 3, 3),
+        Float("learning_rate", 1e-4, 1e-1, log=True),
+    ).compile()
+    record = {"dataset": "protein", "fold": 3, "learning_rate": 1e-2}
+
+    encoded = compiled.encode([record])
+
+    assert compiled.dense_dimension == 1
+    assert compiled.n_continuous == 1
+    assert compiled.n_categorical == 0
+    assert encoded.continuous.shape == (1, 1)
+    assert encoded.categorical.shape == (1, 0)
+    assert compiled.decode(encoded).to_records() == [record]
+
+
 def test_encode_decode_round_trip_and_tensor_identity() -> None:
     compiled = mixed_space().compile(dtype=torch.float64)
     records = [
@@ -108,7 +154,7 @@ def test_numpy_pandas_and_polars_adapters() -> None:
 def test_dense_bridge_repairs_every_variable_kind() -> None:
     compiled = mixed_space().compile()
     raw = torch.tensor(
-        [[-20.0, 3.4, 1.6, math.log10(4.3), 7.6, 9.0, -2.0]],
+        [[-20.0, 3.4, 1.6, math.log(4.3) / math.log(100), 7.6, 9.0, -2.0]],
         dtype=torch.float32,
     )
     encoded = compiled.encoded_from_dense(raw)
@@ -162,11 +208,11 @@ def test_canonical_keys_follow_semantic_integer_values() -> None:
     )
     # Distinct search coordinates that both decode to integer 4 are one point.
     first = EncodedBatch(
-        torch.tensor([[math.log10(4.1), 0.25]], dtype=torch.float64),
+        torch.tensor([[math.log(4.1) / math.log(100), 0.25]], dtype=torch.float64),
         torch.empty((1, 0), dtype=torch.int64),
     )
     second = EncodedBatch(
-        torch.tensor([[math.log10(4.4), 0.25]], dtype=torch.float64),
+        torch.tensor([[math.log(4.4) / math.log(100), 0.25]], dtype=torch.float64),
         torch.empty((1, 0), dtype=torch.int64),
     )
     assert compiled.canonical_keys(first) == compiled.canonical_keys(second)

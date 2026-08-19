@@ -239,8 +239,7 @@ class Integer(Parameter):
                 float(round(math.log(self.high, self.base))),
             )
         if self.log:
-            denominator = math.log(self.base)
-            return math.log(self.low) / denominator, math.log(self.high) / denominator
+            return (0.0, 0.0) if self.low == self.high else (0.0, 1.0)
         if self.step != 1:
             return 0.0, float((self.high - self.low) // self.step)
         return float(self.low), float(self.high)
@@ -263,10 +262,23 @@ class Integer(Parameter):
                 )
         return integer
 
+    def _encode_log_values(self, values: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
+        if self.low == self.high:
+            return torch.zeros(values.shape, dtype=dtype, device=values.device)
+        semantic = values.to(dtype=torch.float64)
+        log_low = math.log(self.low)
+        log_span = math.log(self.high) - log_low
+        transformed = (torch.log(semantic) - log_low) / log_span
+        transformed = torch.where(semantic == self.low, torch.zeros_like(transformed), transformed)
+        transformed = torch.where(semantic == self.high, torch.ones_like(transformed), transformed)
+        return transformed.clamp(0.0, 1.0).to(dtype=dtype)
+
     def encode_values(self, values: list[object], *, dtype: torch.dtype) -> torch.Tensor:
         validated = [self._validate_user_integer(value) for value in values]
+        if self.log and not self.exponent:
+            return self._encode_log_values(torch.tensor(validated, dtype=torch.int64), dtype=dtype)
         result = torch.tensor(validated, dtype=dtype)
-        if self.exponent or self.log:
+        if self.exponent:
             transformed = torch.log(result) / math.log(self.base)
             lower, upper = self.optimization_bounds
             return transformed.clamp(lower, upper)
@@ -281,7 +293,10 @@ class Integer(Parameter):
                 torch.tensor(self.base, dtype=torch.float64), coordinates.round()
             ).round()
         elif self.log:
-            decoded = torch.pow(torch.tensor(self.base, dtype=torch.float64), coordinates).round()
+            coordinates = coordinates.clamp(0.0, 1.0)
+            log_low = math.log(self.low)
+            log_span = math.log(self.high) - log_low
+            decoded = torch.exp(log_low + coordinates * log_span).round()
         elif self.step != 1:
             decoded = coordinates.round() * self.step + self.low
         else:
