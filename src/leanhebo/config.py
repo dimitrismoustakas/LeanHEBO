@@ -35,7 +35,6 @@ class GPConfig:
     """Exact-GP fitting and lifecycle controls."""
 
     learning_rate: float = 1e-2
-    optimizer: Literal["psgld", "adam", "lbfgs"] = "psgld"
     initial_steps: int = 100
     update_steps: int = 10
     full_refit_interval: int | None = 25
@@ -59,7 +58,6 @@ class GPConfig:
     kernel_initialization_samples: int = 1000
     lengthscale_lower_bound: float = 0.02
     jitter: float = 1e-8
-    lbfgs_max_iter: int = 5
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
@@ -95,8 +93,6 @@ class GPConfig:
             raise ValueError("lengthscale_lower_bound must be positive and finite")
         if not math.isfinite(self.jitter) or self.jitter <= 0:
             raise ValueError("jitter must be positive and finite")
-        if self.lbfgs_max_iter < 1:
-            raise ValueError("lbfgs_max_iter must be positive")
         if self.max_cholesky_size is not None and self.max_cholesky_size < 0:
             raise ValueError("max_cholesky_size cannot be negative")
         if self.max_preconditioner_size is not None and self.max_preconditioner_size < 0:

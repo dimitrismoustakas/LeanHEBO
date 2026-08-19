@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 import pytest
 import torch
 
@@ -16,7 +14,6 @@ from leanhebo.gp.kernel import (
     build_kernel,
     initialize_numeric_lengthscales,
 )
-from leanhebo.gp.optimizer import PreconditionedSGLD
 from leanhebo.runtime.rng import make_generator
 
 
@@ -25,7 +22,6 @@ def _surrogate(*, categories: tuple[int, ...] = ()) -> ExactGPSurrogate:
         num_continuous=1,
         category_sizes=categories,
         config=GPConfig(
-            optimizer="adam",
             initial_steps=1,
             update_steps=1,
             full_refit_interval=None,
@@ -42,7 +38,6 @@ def _fantasy_surrogate(*, categories: tuple[int, ...] = ()) -> ExactGPSurrogate:
         num_continuous=1,
         category_sizes=categories,
         config=GPConfig(
-            optimizer="adam",
             initial_steps=1,
             update_steps=0,
             full_refit_interval=None,
@@ -55,20 +50,15 @@ def _fantasy_surrogate(*, categories: tuple[int, ...] = ()) -> ExactGPSurrogate:
     )
 
 
-@pytest.mark.parametrize("optimizer", ["psgld", "adam", "lbfgs"])
-def test_public_gp_optimizer_choices_fit_and_predict(
-    optimizer: Literal["psgld", "adam", "lbfgs"],
-) -> None:
+def test_adam_fits_and_predicts() -> None:
     gp = ExactGPSurrogate(
         num_continuous=1,
         category_sizes=(),
         config=GPConfig(
-            optimizer=optimizer,
             initial_steps=1,
             update_steps=1,
             full_refit_interval=None,
             full_refit_growth_factor=None,
-            lbfgs_max_iter=1,
         ),
         runtime=RuntimeConfig(seed=3),
         generator=make_generator("cpu", 3),
@@ -85,6 +75,7 @@ def test_public_gp_optimizer_choices_fit_and_predict(
 
     assert report.kind == "initial"
     assert report.completed_steps == 1
+    assert isinstance(gp.optimizer, torch.optim.Adam)
     assert mean.shape == variance.shape == (2,)
     assert torch.isfinite(mean).all()
     assert torch.all(variance > 0)
@@ -98,7 +89,7 @@ def test_gp_fit_failure_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     targets = continuous[:, 0].square()
     calls = 0
 
-    def fail(*_: object) -> float:
+    def fail(_: object) -> float:
         nonlocal calls
         calls += 1
         raise RuntimeError("cholesky failed")
@@ -151,7 +142,6 @@ def test_fantasy_update_matches_set_train_data_and_preserves_prediction_cache() 
         num_continuous=1,
         category_sizes=(3,),
         config=GPConfig(
-            optimizer="adam",
             initial_steps=1,
             update_steps=0,
             full_refit_interval=None,
@@ -292,13 +282,12 @@ def test_fantasy_update_restores_model_state_after_a_numerical_failure(
     assert model.likelihood is likelihood
 
 
-def test_fantasy_update_rebinds_psgld_state_to_the_copied_model() -> None:
+def test_fantasy_update_rebinds_adam_state_to_the_copied_model() -> None:
     runtime = RuntimeConfig(seed=16)
     gp = ExactGPSurrogate(
         num_continuous=1,
         category_sizes=(),
         config=GPConfig(
-            optimizer="psgld",
             initial_steps=1,
             update_steps=0,
             full_refit_interval=None,
@@ -313,15 +302,15 @@ def test_fantasy_update_rebinds_psgld_state_to_the_copied_model() -> None:
     targets = continuous[:, 0].square()
     gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
     gp.predict(continuous[:1], categorical[:1])
-    assert isinstance(gp.optimizer, PreconditionedSGLD)
-    previous_steps = gp.optimizer.steps
+    assert isinstance(gp.optimizer, torch.optim.Adam)
+    previous_steps = sorted(int(state["step"].item()) for state in gp.optimizer.state.values())
 
     report = gp.fit(continuous, categorical, targets, transform_version=1)
 
     assert report.kind == "fantasy_update"
-    assert isinstance(gp.optimizer, PreconditionedSGLD)
-    assert gp.optimizer.steps == previous_steps
-    assert gp.optimizer.factor == 0.25
+    assert isinstance(gp.optimizer, torch.optim.Adam)
+    current_steps = sorted(int(state["step"].item()) for state in gp.optimizer.state.values())
+    assert current_steps == previous_steps
     assert gp.model is not None
     assert {
         id(parameter) for group in gp.optimizer.param_groups for parameter in group["params"]
@@ -368,7 +357,7 @@ def test_categorical_only_gp_uses_checkpointed_identity_input_scaler() -> None:
     gp = ExactGPSurrogate(
         num_continuous=0,
         category_sizes=(2,),
-        config=GPConfig(optimizer="adam", initial_steps=1, update_steps=1),
+        config=GPConfig(initial_steps=1, update_steps=1),
         runtime=RuntimeConfig(seed=6),
         generator=make_generator("cpu", 6),
     )
@@ -469,7 +458,6 @@ def test_scheduled_full_refit_cadence_resets_after_each_refit() -> None:
         num_continuous=1,
         category_sizes=(),
         config=GPConfig(
-            optimizer="adam",
             initial_steps=0,
             update_steps=0,
             full_refit_interval=2,
@@ -507,7 +495,6 @@ def test_disabled_optimizer_reuse_resets_state_on_warm_update() -> None:
         num_continuous=1,
         category_sizes=(),
         config=GPConfig(
-            optimizer="adam",
             initial_steps=1,
             update_steps=1,
             full_refit_interval=None,
@@ -529,36 +516,6 @@ def test_disabled_optimizer_reuse_resets_state_on_warm_update() -> None:
 
     assert gp.optimizer is not None and id(gp.optimizer) != optimizer_id
     assert gp.model is not None and id(gp.model) == model_id
-
-
-def test_psgld_custom_schedule_survives_optimizer_state_round_trip() -> None:
-    parameter = torch.nn.Parameter(torch.tensor([1.0]))
-    optimizer = PreconditionedSGLD(
-        [parameter],
-        lr=0.01,
-        factor=0.25,
-        pretrain_steps=1,
-        generator=make_generator("cpu", 8),
-    )
-    for _ in range(2):
-        parameter.grad = torch.ones_like(parameter)
-        optimizer.step()
-    state = optimizer.state_dict()
-
-    restored_parameter = torch.nn.Parameter(torch.tensor([1.0]))
-    restored = PreconditionedSGLD(
-        [restored_parameter],
-        lr=0.5,
-        factor=1.0,
-        pretrain_steps=99,
-        generator=make_generator("cpu", 9),
-    )
-    restored.load_state_dict(state)
-
-    assert restored.steps == 2
-    assert restored.pretrain_steps == 1
-    assert restored.factor == 0.25
-    assert restored.state[restored_parameter]["square_avg"].numel() == 1
 
 
 def test_model_initialization_is_seeded_without_mutating_global_rng() -> None:

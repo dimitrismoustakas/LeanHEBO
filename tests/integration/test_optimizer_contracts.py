@@ -51,7 +51,6 @@ def _config(
             acquisition_batch_size=acquisition_batch_size,
         ),
         gp=GPConfig(
-            optimizer="adam",
             initial_steps=1,
             update_steps=1,
             full_refit_interval=None,
@@ -280,7 +279,6 @@ def test_optimizer_uses_fantasy_update_when_preprocessing_and_cache_are_stable()
             random_samples=2,
             runtime=RuntimeConfig(seed=41, acquisition_batch_size=None),
             gp=GPConfig(
-                optimizer="adam",
                 initial_steps=1,
                 update_steps=0,
                 full_refit_interval=None,

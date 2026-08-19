@@ -16,7 +16,6 @@ def _config(*, seed: int = 9) -> LeanHEBOConfig:
         random_samples=3,
         runtime=RuntimeConfig(seed=seed, acquisition_batch_size=32),
         gp=GPConfig(
-            optimizer="adam",
             initial_steps=2,
             update_steps=1,
             full_refit_interval=None,

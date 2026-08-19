@@ -18,7 +18,7 @@ def test_configuration_round_trip() -> None:
     config = LeanHEBOConfig(
         random_samples=5,
         runtime=RuntimeConfig(dtype="float64", seed=17),
-        gp=GPConfig(optimizer="adam", initial_steps=3),
+        gp=GPConfig(initial_steps=3),
         search=SearchConfig(population_size=16, generations=4),
     )
     assert LeanHEBOConfig.from_dict(config.to_dict()) == config

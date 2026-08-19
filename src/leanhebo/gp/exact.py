@@ -22,7 +22,6 @@ from leanhebo.gp.kernel import (
     build_kernel,
     initialize_numeric_lengthscales,
 )
-from leanhebo.gp.optimizer import PreconditionedSGLD, create_optimizer
 from leanhebo.transforms import IdentityScaler, TorchMinMaxScaler
 
 
@@ -88,7 +87,7 @@ class ExactGPSurrogate:
         self.input_scaler.to(device=self.device, dtype=self.dtype)
         self.model: _MixedExactGP | None = None
         self.likelihood: gpytorch.likelihoods.GaussianLikelihood | None = None
-        self.optimizer: torch.optim.Optimizer | None = None
+        self.optimizer: torch.optim.Adam | None = None
         self.train_continuous: torch.Tensor | None = None
         self.train_categorical: torch.Tensor | None = None
         self.train_targets: torch.Tensor | None = None
@@ -232,8 +231,6 @@ class ExactGPSurrogate:
             )
             if not self.config.reuse_optimizer_state:
                 self.optimizer = self._create_optimizer()
-            elif isinstance(self.optimizer, PreconditionedSGLD):
-                self.optimizer.set_observation_count(targets.numel())
 
         if transform_changed and self.diagnostics is not None:
             self.diagnostics.increment("gp.transform_invalidations")
@@ -329,7 +326,7 @@ class ExactGPSurrogate:
         old_model_likelihood = self.model.likelihood
         try:
             with (
-                self._settings(self.config.jitter),
+                self._settings(),
                 gpytorch.settings.fast_pred_var(self.config.fast_pred_var),
             ):
                 fantasy_model = self.model.get_fantasy_model(
@@ -356,8 +353,6 @@ class ExactGPSurrogate:
         optimizer = self._create_optimizer()
         if self.config.reuse_optimizer_state and optimizer_state is not None:
             optimizer.load_state_dict(dict(optimizer_state))
-        if isinstance(optimizer, PreconditionedSGLD):
-            optimizer.set_observation_count(targets.numel())
         self.optimizer = optimizer
         return None
 
@@ -419,29 +414,19 @@ class ExactGPSurrogate:
         optimizer = self._create_optimizer()
         if retain_optimizer_state is not None:
             optimizer.load_state_dict(dict(retain_optimizer_state))
-        if isinstance(optimizer, PreconditionedSGLD):
-            # A retained optimizer may come from a smaller training set.
-            optimizer.set_observation_count(self.train_targets.numel())
         self.optimizer = optimizer
 
-    def _create_optimizer(self) -> torch.optim.Optimizer:
+    def _create_optimizer(self) -> torch.optim.Adam:
         assert self.model is not None
-        assert self.train_targets is not None
-        return create_optimizer(
-            self.config.optimizer,
-            self.model.parameters(),
-            learning_rate=self.config.learning_rate,
-            observations=self.train_targets.numel(),
-            pretrain_steps=max(1, self.config.initial_steps // 10),
-            lbfgs_max_iter=self.config.lbfgs_max_iter,
-            generator=self.generator,
-        )
+        return torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate)
 
-    def _settings(self, jitter: float) -> ExitStack:
+    def _settings(self) -> ExitStack:
         stack = ExitStack()
         stack.enter_context(
             gpytorch.settings.cholesky_jitter(
-                float_value=jitter, double_value=jitter, half_value=jitter
+                float_value=self.config.jitter,
+                double_value=self.config.jitter,
+                half_value=self.config.jitter,
             )
         )
         if self.config.max_cholesky_size is not None:
@@ -474,7 +459,7 @@ class ExactGPSurrogate:
 
         try:
             for _ in range(requested_steps):
-                final_loss = self._optimization_step(mll, self.config.jitter)
+                final_loss = self._optimization_step(mll)
                 completed += 1
                 if not math.isfinite(final_loss):
                     raise NumericalError("exact-GP fitting produced a non-finite loss")
@@ -519,9 +504,7 @@ class ExactGPSurrogate:
             failure=failure,
         )
 
-    def _optimization_step(
-        self, mll: gpytorch.mlls.ExactMarginalLogLikelihood, jitter: float
-    ) -> float:
+    def _optimization_step(self, mll: gpytorch.mlls.ExactMarginalLogLikelihood) -> float:
         assert self.model is not None
         assert self.optimizer is not None
         assert self.train_continuous is not None
@@ -534,21 +517,12 @@ class ExactGPSurrogate:
         train_categorical = self.train_categorical
         train_targets = self.train_targets
 
-        def closure() -> torch.Tensor:
-            optimizer.zero_grad(set_to_none=True)
-            with self._settings(jitter):
-                distribution = model(train_continuous, train_categorical)
-                loss: torch.Tensor = -mll(distribution, train_targets)
-            loss.backward()  # type: ignore[no-untyped-call]
-            return loss
-
-        if isinstance(optimizer, torch.optim.LBFGS):
-            loss = optimizer.step(closure)  # type: ignore[no-untyped-call]
-            if loss is None:
-                loss = closure().detach()
-        else:
-            loss = closure()
-            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        with self._settings():
+            distribution = model(train_continuous, train_categorical)
+            loss: torch.Tensor = -mll(distribution, train_targets)
+        loss.backward()  # type: ignore[no-untyped-call]
+        optimizer.step()
         return float(loss.detach().cpu())
 
     @torch.no_grad()
@@ -569,7 +543,7 @@ class ExactGPSurrogate:
             self.diagnostics.increment("posterior.calls")
             self.diagnostics.increment("posterior.candidates", continuous.shape[0])
         with (
-            self._settings(self.config.jitter),
+            self._settings(),
             gpytorch.settings.fast_pred_var(self.config.fast_pred_var),
         ):
             if self.config.eval_cg_tolerance is None:
