@@ -83,6 +83,8 @@ class GPConfig:
             raise ValueError("fantasy updates require update_steps=0 so their cache remains valid")
         if self.use_fantasy_updates and not self.reuse_parameters:
             raise ValueError("fantasy updates require reuse_parameters=True")
+        if self.reuse_optimizer_state and not self.reuse_parameters:
+            raise ValueError("optimizer-state reuse requires reuse_parameters=True")
         if self.patience < 1:
             raise ValueError("patience must be positive")
         if not math.isfinite(self.relative_tolerance) or self.relative_tolerance < 0:

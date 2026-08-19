@@ -92,7 +92,6 @@ class ExactGPSurrogate:
         self.train_categorical: torch.Tensor | None = None
         self.train_targets: torch.Tensor | None = None
         self.transform_version = -1
-        self.fit_count = 0
         self.update_count = 0
         self.full_refit_count = 0
         self.updates_since_full_refit = 0
@@ -171,14 +170,14 @@ class ExactGPSurrogate:
 
         if self.config.use_fantasy_updates and not full_refit:
             fantasy_start = time.perf_counter()
-            fallback_reason = self._try_fantasy_update(
+            skip_reason = self._try_fantasy_update(
                 continuous,
                 categorical,
                 targets,
                 transform_version=transform_version,
                 optimizer_state=previous_optimizer_state,
             )
-            if fallback_reason is None:
+            if skip_reason is None:
                 self.transform_version = transform_version
                 report = FitReport(
                     kind="fantasy_update",
@@ -188,7 +187,6 @@ class ExactGPSurrogate:
                     final_loss=None,
                     wall_time=time.perf_counter() - fantasy_start,
                 )
-                self.fit_count += 1
                 self.update_count += 1
                 self.updates_since_full_refit += 1
                 if self.diagnostics is not None:
@@ -196,8 +194,8 @@ class ExactGPSurrogate:
                     self.diagnostics.increment("gp.fantasy_update")
                 return report
             if self.diagnostics is not None:
-                self.diagnostics.increment("gp.fantasy_fallback")
-                self.diagnostics.increment(f"gp.fantasy_fallback.{fallback_reason}")
+                self.diagnostics.increment("gp.fantasy_skipped")
+                self.diagnostics.increment(f"gp.fantasy_skipped.{skip_reason}")
 
         self.input_scaler.fit(continuous)
         continuous = self.input_scaler.transform(continuous).contiguous()
@@ -235,7 +233,6 @@ class ExactGPSurrogate:
         if transform_changed and self.diagnostics is not None:
             self.diagnostics.increment("gp.transform_invalidations")
         report = self._optimize(kind, steps)
-        self.fit_count += 1
         if first_fit or full_refit:
             self.full_refit_count += 1
             self.updates_since_full_refit = 0
@@ -271,7 +268,7 @@ class ExactGPSurrogate:
         transform_version: int,
         optimizer_state: Mapping[str, Any] | None,
     ) -> str | None:
-        """Append data through GPyTorch's exact cache update, or return a fallback reason."""
+        """Append data through GPyTorch's exact cache update, or explain why it is inapplicable."""
 
         if (
             self.model is None
@@ -290,11 +287,6 @@ class ExactGPSurrogate:
         old_count = self.train_targets.numel()
         if targets.numel() <= old_count:
             return "not_append_only"
-        appended_count = targets.numel() - old_count
-        if appended_count >= old_count:
-            # GPyTorch's fantasy update is intended for a small append relative to the cached
-            # history. Rebuilding is the safer cost profile once the append is as large as it.
-            return "batch_not_smaller_than_history"
         if (
             continuous.shape[0] != targets.numel()
             or categorical.shape[0] != targets.numel()
@@ -333,10 +325,6 @@ class ExactGPSurrogate:
                     [scaled_continuous[old_count:], categorical[old_count:]],
                     targets[old_count:],
                 )
-        except RuntimeError as error:
-            if not _looks_numerical(error):
-                raise
-            return "numerical_error"
         finally:
             # GPyTorch temporarily removes these fields while deep-copying an ExactGP but does
             # not protect that mutation with its own finally block.
@@ -605,19 +593,3 @@ class ExactGPSurrogate:
         self.transform_version = int(state["transform_version"])
         self.updates_since_full_refit = int(state["updates_since_full_refit"])
         self.last_full_fit_observations = int(state["last_full_fit_observations"])
-
-
-def _looks_numerical(error: RuntimeError) -> bool:
-    text = str(error).lower()
-    return any(
-        token in text
-        for token in (
-            "cholesky",
-            "not positive definite",
-            "singular",
-            "nan",
-            "inf",
-            "symeig",
-            "linalg",
-        )
-    )

@@ -43,8 +43,13 @@ def test_unknown_top_level_configuration_field_is_rejected() -> None:
                 update_steps=0,
                 use_fantasy_updates=True,
                 reuse_parameters=False,
+                reuse_optimizer_state=False,
             ),
             "reuse_parameters=True",
+        ),
+        (
+            lambda: GPConfig(reuse_parameters=False, reuse_optimizer_state=True),
+            "optimizer-state reuse requires reuse_parameters=True",
         ),
         (lambda: GPConfig(learning_rate=float("nan")), "learning_rate"),
         (lambda: GPConfig(jitter=0.0), "jitter"),
@@ -62,10 +67,3 @@ def test_unknown_top_level_configuration_field_is_rejected() -> None:
 def test_invalid_configuration_is_rejected(factory: object, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         factory()  # type: ignore[operator]
-
-
-def test_fantasy_updates_allow_scheduled_output_refits() -> None:
-    gp = GPConfig(update_steps=0, use_fantasy_updates=True)
-
-    config = LeanHEBOConfig(gp=gp, warp=WarpConfig(refit_interval=3))
-    assert config.gp.use_fantasy_updates
