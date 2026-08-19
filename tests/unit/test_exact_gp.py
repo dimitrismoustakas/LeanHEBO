@@ -9,6 +9,7 @@ import torch
 
 from leanhebo.config import GPConfig, RuntimeConfig
 from leanhebo.diagnostics import Diagnostics
+from leanhebo.errors import NumericalError
 from leanhebo.gp import ExactGPSurrogate
 from leanhebo.gp.kernel import (
     MixedFeatureExtractor,
@@ -88,6 +89,26 @@ def test_public_gp_optimizer_choices_fit_and_predict(
     assert torch.isfinite(mean).all()
     assert torch.all(variance > 0)
     assert noise > 0
+
+
+def test_gp_fit_failure_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    gp = _surrogate()
+    continuous = torch.tensor([[0.0], [0.5], [1.0]])
+    categorical = torch.empty((3, 0), dtype=torch.long)
+    targets = continuous[:, 0].square()
+    calls = 0
+
+    def fail(*_: object) -> float:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("cholesky failed")
+
+    monkeypatch.setattr(gp, "_optimization_step", fail)
+
+    with pytest.raises(NumericalError, match="cholesky failed"):
+        gp.fit(continuous, categorical, targets, transform_version=1)
+
+    assert calls == 1
 
 
 def test_persistent_update_reuses_model_and_changes_train_data() -> None:

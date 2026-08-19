@@ -25,8 +25,6 @@ class FitReport:
     completed_steps: int
     final_loss: float | None
     wall_time: float
-    maximum_jitter: float
-    jitter_retries: int
     early_stopped: bool = False
     failure: str | None = None
 

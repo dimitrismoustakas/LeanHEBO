@@ -19,7 +19,7 @@ from leanhebo.config import LeanHEBOConfig
 from leanhebo.data import CandidateBatch, EncodedBatch
 from leanhebo.data.store import ObservationStore
 from leanhebo.diagnostics import Diagnostics, FitReport
-from leanhebo.errors import CheckpointError, NumericalError, SearchSpaceExhaustedError
+from leanhebo.errors import CheckpointError, SearchSpaceExhaustedError
 from leanhebo.gp import ExactGPSurrogate
 from leanhebo.runtime.rng import RandomStreams
 from leanhebo.search import MixedVariableSpec, NSGA2Result, TorchNSGA2
@@ -144,17 +144,8 @@ class LeanHEBO:
             if len(self.store) < self.random_samples:
                 with self.diagnostics.phase("suggest.initial_sampling"):
                     return self._fill_unique(None, n_suggestions, fixed)
-            try:
-                self._ensure_model()
-                return self._model_suggest(n_suggestions, fixed)
-            except NumericalError:
-                self.diagnostics.increment("gp.numerical_recovery_attempts")
-                try:
-                    self._ensure_model(reset_parameters=True)
-                    return self._model_suggest(n_suggestions, fixed)
-                except NumericalError:
-                    self.diagnostics.increment("gp.numerical_recovery_failures")
-                    raise
+            self._ensure_model()
+            return self._model_suggest(n_suggestions, fixed)
 
     def _compile_fixed(self, value: Mapping[str, object] | FixedInput | None) -> FixedInput | None:
         if value is None:
@@ -179,12 +170,11 @@ class LeanHEBO:
             diagnostics=self.diagnostics,
         )
 
-    def _ensure_model(self, *, reset_parameters: bool = False) -> FitReport | None:
+    def _ensure_model(self) -> FitReport | None:
         if (
             self._surrogate is not None
             and self._model_observation_version == self.store.observation_version
             and not self._force_full_refit
-            and not reset_parameters
         ):
             return None
         observations = self.store._materialize_view()
@@ -207,8 +197,7 @@ class LeanHEBO:
                 observations.categorical,
                 transformed,
                 transform_version=self.output_transform.version,
-                force_full_refit=self._force_full_refit or reset_parameters,
-                reset_parameters=reset_parameters,
+                force_full_refit=self._force_full_refit,
             )
         self._model_observation_version = self.store.observation_version
         self._force_full_refit = False
@@ -376,27 +365,52 @@ class LeanHEBO:
             encoded_rows.append(initial.encoded)
             seen.update(self.space.canonical_keys(initial))
         retained = sum(len(batch) for batch in encoded_rows)
-        attempts = 0
-        while retained < requested and attempts < 8:
+        fixed_values = {} if fixed is None else dict(fixed.decoded_values)
+        finite_domain = all(
+            self._finite_cardinality(parameter, fixed_values) is not None
+            for parameter in self.space.parameters
+        )
+        while retained < requested:
             missing = requested - retained
-            draw = self._draw_sobol(max(4, missing * 2), fixed)
+            if self.space.dense_dimension == 0:
+                completion = self._finite_unseen(missing, fixed, seen)
+                encoded_rows.extend(completion)
+                retained += sum(len(batch) for batch in completion)
+                break
+
+            draw = self._draw_sobol(missing, fixed)
             historical_unique = self.store.unique_mask(draw)
             keys = self.space.canonical_keys(draw)
-            keep: list[int] = []
+            fallback: list[tuple[EncodedBatch, tuple[int, ...]]] = []
+            fallback_index = 0
+            exhausted = False
             for index, key in enumerate(keys):
                 if bool(historical_unique[index]) and key not in seen:
-                    keep.append(index)
-                    seen.add(key)
-                    retained += 1
-                    if retained == requested:
+                    row = draw.select([index]).encoded
+                elif finite_domain:
+                    if not fallback:
+                        completion = self._finite_unseen(len(keys) - index, fixed, set(seen))
+                        fallback = [
+                            (batch.select([fallback_row]), fallback_key)
+                            for batch in completion
+                            for fallback_row, fallback_key in enumerate(
+                                self.space.canonical_keys(batch)
+                            )
+                        ]
+                    while fallback_index < len(fallback) and fallback[fallback_index][1] in seen:
+                        fallback_index += 1
+                    if fallback_index == len(fallback):
+                        exhausted = True
                         break
-            if keep:
-                encoded_rows.append(draw.select(keep).encoded)
-            attempts += 1
-        if retained < requested:
-            completion = self._finite_unseen(requested - retained, fixed, seen)
-            encoded_rows.extend(completion)
-            retained += sum(len(batch) for batch in completion)
+                    row, key = fallback[fallback_index]
+                    fallback_index += 1
+                else:
+                    continue
+                encoded_rows.append(row)
+                seen.add(key)
+                retained += 1
+            if exhausted:
+                break
         if retained < requested:
             missing = requested - retained
             self.diagnostics.increment("suggest.uniqueness_exhausted", missing)

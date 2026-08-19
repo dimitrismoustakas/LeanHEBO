@@ -145,7 +145,6 @@ class ExactGPSurrogate:
         *,
         transform_version: int,
         force_full_refit: bool = False,
-        reset_parameters: bool = False,
     ) -> FitReport:
         """Cold-fit, warm-update, or scheduled-refit the exact GP."""
 
@@ -159,12 +158,7 @@ class ExactGPSurrogate:
             raise ValueError("at least two observations are required to fit an exact GP")
 
         first_fit = self.model is None
-        full_refit = (
-            first_fit
-            or force_full_refit
-            or reset_parameters
-            or self._full_refit_due(targets.numel())
-        )
+        full_refit = first_fit or force_full_refit or self._full_refit_due(targets.numel())
         kind = "initial" if first_fit else ("full_refit" if full_refit else "update")
         steps = self.config.initial_steps if full_refit else self.config.update_steps
         previous_model_state = self.model.state_dict() if self.model is not None else None
@@ -194,8 +188,6 @@ class ExactGPSurrogate:
                     completed_steps=0,
                     final_loss=None,
                     wall_time=time.perf_counter() - fantasy_start,
-                    maximum_jitter=self.config.jitter_initial,
-                    jitter_retries=0,
                 )
                 self.fit_count += 1
                 self.update_count += 1
@@ -219,21 +211,19 @@ class ExactGPSurrogate:
         if full_refit or not self.config.use_set_train_data or not self.config.reuse_parameters:
             self._construct_model(
                 retain_model_state=(
-                    previous_model_state
-                    if self.config.reuse_parameters and not first_fit and not reset_parameters
-                    else None
+                    previous_model_state if self.config.reuse_parameters and not first_fit else None
                 ),
                 retain_likelihood_state=(
                     previous_likelihood_state
-                    if self.config.reuse_parameters and not first_fit and not reset_parameters
+                    if self.config.reuse_parameters and not first_fit
                     else None
                 ),
                 retain_optimizer_state=(
                     previous_optimizer_state
-                    if self.config.reuse_optimizer_state and not first_fit and not reset_parameters
+                    if self.config.reuse_optimizer_state and not first_fit
                     else None
                 ),
-                initialize_kernel=first_fit or reset_parameters or not self.config.reuse_parameters,
+                initialize_kernel=first_fit or not self.config.reuse_parameters,
             )
         else:
             assert self.model is not None
@@ -339,7 +329,7 @@ class ExactGPSurrogate:
         old_model_likelihood = self.model.likelihood
         try:
             with (
-                self._settings(self.config.jitter_initial),
+                self._settings(self.config.jitter),
                 gpytorch.settings.fast_pred_var(self.config.fast_pred_var),
             ):
                 fantasy_model = self.model.get_fantasy_model(
@@ -477,8 +467,6 @@ class ExactGPSurrogate:
         mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.likelihood, self.model)
         completed = 0
         final_loss: float | None = None
-        maximum_jitter = self.config.jitter_initial
-        total_retries = 0
         early_stopped = False
         stable_steps = 0
         previous_loss: float | None = None
@@ -486,26 +474,7 @@ class ExactGPSurrogate:
 
         try:
             for _ in range(requested_steps):
-                jitter = self.config.jitter_initial
-                step_retries = 0
-                while True:
-                    try:
-                        final_loss = self._optimization_step(mll, jitter)
-                        break
-                    except RuntimeError as exc:
-                        if not _looks_numerical(exc):
-                            raise
-                        step_retries += 1
-                        total_retries += 1
-                        jitter *= self.config.jitter_multiplier
-                        maximum_jitter = max(maximum_jitter, jitter)
-                        if (
-                            step_retries > self.config.max_jitter_retries
-                            or jitter > self.config.jitter_max
-                        ):
-                            raise NumericalError(
-                                "exact-GP fitting failed after jitter escalation"
-                            ) from exc
+                final_loss = self._optimization_step(mll, self.config.jitter)
                 completed += 1
                 if not math.isfinite(final_loss):
                     raise NumericalError("exact-GP fitting produced a non-finite loss")
@@ -530,8 +499,6 @@ class ExactGPSurrogate:
                 completed_steps=completed,
                 final_loss=final_loss,
                 wall_time=time.perf_counter() - start,
-                maximum_jitter=maximum_jitter,
-                jitter_retries=total_retries,
                 early_stopped=early_stopped,
                 failure=failure,
             )
@@ -548,8 +515,6 @@ class ExactGPSurrogate:
             completed_steps=completed,
             final_loss=final_loss,
             wall_time=time.perf_counter() - start,
-            maximum_jitter=maximum_jitter,
-            jitter_retries=total_retries,
             early_stopped=early_stopped,
             failure=failure,
         )
@@ -603,35 +568,22 @@ class ExactGPSurrogate:
         if self.diagnostics is not None:
             self.diagnostics.increment("posterior.calls")
             self.diagnostics.increment("posterior.candidates", continuous.shape[0])
-        jitter = self.config.jitter_initial
-        retries = 0
-        while True:
-            try:
-                with (
-                    self._settings(jitter),
-                    gpytorch.settings.fast_pred_var(self.config.fast_pred_var),
-                ):
-                    if self.config.eval_cg_tolerance is None:
-                        distribution = self.model(continuous, categorical)
-                    else:
-                        with gpytorch.settings.eval_cg_tolerance(self.config.eval_cg_tolerance):
-                            distribution = self.model(continuous, categorical)
-                    if self.config.predict_observation_noise:
-                        distribution = self.likelihood(distribution)
-                mean = distribution.mean.reshape(-1)
-                variance = distribution.variance.reshape(-1).clamp_min(torch.finfo(self.dtype).eps)
-                if not torch.isfinite(mean).all() or not torch.isfinite(variance).all():
-                    raise NumericalError("exact-GP posterior contains non-finite values")
-                return mean, variance, self.noise_variance
-            except RuntimeError as exc:
-                if not _looks_numerical(exc):
-                    raise
-                retries += 1
-                jitter *= self.config.jitter_multiplier
-                if retries > self.config.max_jitter_retries or jitter > self.config.jitter_max:
-                    raise NumericalError(
-                        "exact-GP posterior failed after jitter escalation"
-                    ) from exc
+        with (
+            self._settings(self.config.jitter),
+            gpytorch.settings.fast_pred_var(self.config.fast_pred_var),
+        ):
+            if self.config.eval_cg_tolerance is None:
+                distribution = self.model(continuous, categorical)
+            else:
+                with gpytorch.settings.eval_cg_tolerance(self.config.eval_cg_tolerance):
+                    distribution = self.model(continuous, categorical)
+            if self.config.predict_observation_noise:
+                distribution = self.likelihood(distribution)
+        mean = distribution.mean.reshape(-1)
+        variance = distribution.variance.reshape(-1).clamp_min(torch.finfo(self.dtype).eps)
+        if not torch.isfinite(mean).all() or not torch.isfinite(variance).all():
+            raise NumericalError("exact-GP posterior contains non-finite values")
+        return mean, variance, self.noise_variance
 
     def state_dict(self) -> dict[str, Any]:
         return {

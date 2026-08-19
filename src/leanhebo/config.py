@@ -58,10 +58,7 @@ class GPConfig:
     fast_pred_var: bool = True
     kernel_initialization_samples: int = 1000
     lengthscale_lower_bound: float = 0.02
-    jitter_initial: float = 1e-8
-    jitter_multiplier: float = 10.0
-    jitter_max: float = 1.0
-    max_jitter_retries: int = 9
+    jitter: float = 1e-8
     lbfgs_max_iter: int = 5
 
     def __post_init__(self) -> None:
@@ -96,19 +93,8 @@ class GPConfig:
             raise ValueError("kernel_initialization_samples must be at least 2")
         if not math.isfinite(self.lengthscale_lower_bound) or self.lengthscale_lower_bound <= 0:
             raise ValueError("lengthscale_lower_bound must be positive and finite")
-        if (
-            not math.isfinite(self.jitter_initial)
-            or not math.isfinite(self.jitter_multiplier)
-            or self.jitter_initial <= 0
-            or self.jitter_multiplier <= 1
-        ):
-            raise ValueError("invalid jitter schedule")
-        if (
-            not math.isfinite(self.jitter_max)
-            or self.jitter_max < self.jitter_initial
-            or self.max_jitter_retries < 0
-        ):
-            raise ValueError("invalid maximum jitter settings")
+        if not math.isfinite(self.jitter) or self.jitter <= 0:
+            raise ValueError("jitter must be positive and finite")
         if self.lbfgs_max_iter < 1:
             raise ValueError("lbfgs_max_iter must be positive")
         if self.max_cholesky_size is not None and self.max_cholesky_size < 0:
