@@ -1,3 +1,3 @@
 # SPDX-License-Identifier: MIT
 
-"""Development-only benchmark and quality harnesses for LeanHEBO."""
+"""Development-only CARP-S benchmark integration for LeanHEBO."""

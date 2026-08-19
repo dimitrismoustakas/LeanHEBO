@@ -17,7 +17,7 @@ Before submitting a change, run the same checks as CI:
 ```console
 uv run --locked ruff check .
 uv run --locked ruff format --check .
-uv run --locked mypy src/leanhebo benchmarks
+uv run --locked mypy src/leanhebo
 uv run --locked pytest
 uv run --locked pytest benchmarks/tests
 uv build --no-sources

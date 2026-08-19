@@ -1,38 +1,74 @@
-# Benchmarks
+# Benchmark
 
-LeanHEBO does not have a published performance claim yet.
+No benchmark result has been published yet.
 
-## Planned Bayesmark benchmark
+The study asks one question: at the same CARP-S evaluation budgets, does LeanHEBO match
+upstream HEBO's optimization quality while spending less time in `ask` and `tell`?
 
-The benchmark will answer one question:
+It uses the 13 flat tasks in [`tasks.json`](carps/tasks.json): eight BBOB tasks and five
+YAHPO surrogate HPO tasks from the CARP-S 1.1.0 black-box test set. Conditional tasks and the
+HPOBench task are excluded because LeanHEBO does not support conditional spaces and HPOBench
+requires a separate installation path. Each optimizer uses its defaults, suggests one point at
+a time on one CPU thread, and runs 20 seeds with CARP-S's task budgets: 34,900 evaluations per
+optimizer.
 
-> With the same Bayesmark evaluation budget, does LeanHEBO match upstream HEBO's
-> optimization quality while using less optimizer time?
+Quality is CARP-S's pooled per-task min-max normalized incumbent cost; lower is better. The
+figure averages the fixed task set within each seed and shows a 95% interval over the 20 seeds.
+The table reports the paired quality difference, cumulative `ask` plus `tell` time, and the
+HEBO/LeanHEBO time ratio. Failed or incomplete runs stop the analysis instead of being dropped.
 
-The comparison will use LeanHEBO and the pinned upstream HEBO implementation on the
-108 tasks from the HEBO paper: 20 seeds, 16 batches of 8 evaluations, and one CPU
-thread. Each optimizer will use its recommended configuration. The evaluation budget
-is equal; their internal implementations do not need to perform identical work.
+## Run it
 
-The result will be one figure with two plots:
+The benchmark has a separate locked environment. It adds nothing to LeanHEBO's dependencies.
+The first setup builds CARP-S from source and can take about 15 minutes on Windows.
 
-1. Bayesmark normalized mean loss versus evaluations, with 95% intervals. Lower is better.
-2. Cumulative `suggest` plus `observe` time versus evaluations.
+```powershell
+python benchmarks/carps/prepare.py
+$python = (Resolve-Path 'benchmarks/.carps/venv/Scripts/python.exe').Path
+$env:CARPS_TASK_DATA_DIR = (Resolve-Path 'benchmarks/.carps/task_data').Path
+$env:OMP_NUM_THREADS = $env:MKL_NUM_THREADS = $env:OPENBLAS_NUM_THREADS = '1'
+```
 
-A small table will report final quality, optimizer time, the difference between the two
-implementations, and failed runs. Before running it, we will define how close the final scores
-must be to count as equal quality. Until this study is complete, the repository will not claim
-equal quality or a general speedup.
+Check the two real adapters with one trial each:
 
-## Existing timing check
+```powershell
+$common = @(
+  'hydra.searchpath=[pkg://leanhebo_carps.configs]',
+  '+task/subselection/blackbox/test=subset_bbob_2_12_2',
+  'seed=1',
+  'task.optimization_resources.n_trials=1',
+  'baserundir=benchmarks/.carps/smoke'
+)
+uv run --no-project --python $python python -X utf8 -m carps.run `
+  '+optimizer/leanhebo=config' @common
+uv run --no-project --python $python python -X utf8 -m carps.run `
+  '+optimizer/hebo_timed=config' @common
+```
 
-`benchmarks.latency.run_fixed_history` measures one cold model-based suggestion from
-the same synthetic observation history in both implementations. It is useful for
-finding suggestion overhead, but it does not measure optimization quality or a full
-optimization run and is not a release benchmark.
+Run the full comparison only when its cost is intentional:
 
-The toy objectives under `benchmarks.quality` only test the benchmark code. They are
-not evidence about optimizer quality.
+```powershell
+$tasks = ((Get-Content 'benchmarks/carps/tasks.json' -Raw | ConvertFrom-Json).config) -join ','
+$seeds = (1..20) -join ','
+$common = @(
+  'hydra.searchpath=[pkg://leanhebo_carps.configs]',
+  "+task/subselection/blackbox/test=$tasks",
+  "seed=$seeds",
+  'baserundir=benchmarks/.carps/runs'
+)
+uv run --no-project --python $python python -X utf8 -m carps.run --multirun `
+  '+optimizer/leanhebo=config' @common
+uv run --no-project --python $python python -X utf8 -m carps.run --multirun `
+  '+optimizer/hebo_timed=config' @common
 
-The upstream comparison is pinned to HEBO commit
-`ee6112d39d1a9e9703fecaf9057193e1ec9dae72`.
+uv run --no-project --python $python python -X utf8 -m carps.analysis.gather_data `
+  'benchmarks/.carps/runs' --n_processes=1 --outdir='benchmarks/.carps/gathered'
+uv run --no-project --python $python python -X utf8 'benchmarks/carps/analyze.py' `
+  --logs 'benchmarks/.carps/gathered/logs.parquet' `
+  --runs 'benchmarks/.carps/runs' --output 'benchmarks/.carps/carps.png'
+```
+
+For a later hyperparameter study, add a new optimizer config with a unique `optimizer_id` and
+run only that config. Tune on CARP-S development tasks, then evaluate the chosen setting on this
+test set. Existing test results remain reusable while the task list and benchmark lock stay
+unchanged; gather and analyze again to include the new result.

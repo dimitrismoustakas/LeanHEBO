@@ -113,7 +113,7 @@ modules are implementation details.
 
 The repository does not yet claim general speed or optimization-quality superiority. See the
 [benchmark README](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/benchmarks/README.md)
-for the measurements that exist and the planned Bayesmark comparison.
+for the planned CARP-S comparison.
 
 ## Development
 

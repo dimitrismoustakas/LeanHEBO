@@ -1,4 +1,3 @@
 # Local benchmark inputs and generated artifacts.
-.upstream/
-results/
-profiles/
+.carps/
+*.egg-info/

@@ -1,0 +1,17 @@
+# Benchmark-only dependencies. HEBO, LeanHEBO, and this adapter are installed
+# separately with --no-deps by prepare.py.
+carps==1.1.0
+ioh==0.3.18
+numpy==1.26.4
+# CARP-S shells out to pip for env_info and imports platformdirs when gathering results.
+pip==26.2.1
+platformdirs==4.11.2
+yahpo-gym @ git+https://github.com/automl/yahpo_gym.git@93f5b151d4e2f44daa5314cd10533aafec37d630#subdirectory=yahpo_gym
+
+# Runtime dependencies used by HEBO's default GP optimizer.
+disjoint-set>=0.8.0
+gpytorch>=1.14
+pandas>=2.2
+pymoo==0.6.0
+scikit-learn>=1.5
+torch>=2.5
