@@ -163,9 +163,6 @@ class ExactGPSurrogate:
         previous_likelihood_state = (
             self.likelihood.state_dict() if self.likelihood is not None else None
         )
-        previous_optimizer_state = (
-            self.optimizer.state_dict() if self.optimizer is not None else None
-        )
         transform_changed = self.transform_version != transform_version
 
         if self.config.use_fantasy_updates and not full_refit:
@@ -175,7 +172,6 @@ class ExactGPSurrogate:
                 categorical,
                 targets,
                 transform_version=transform_version,
-                optimizer_state=previous_optimizer_state,
             )
             if skip_reason is None:
                 self.transform_version = transform_version
@@ -206,6 +202,14 @@ class ExactGPSurrogate:
         self.transform_version = transform_version
 
         if full_refit or not self.config.use_set_train_data or not self.config.reuse_parameters:
+            retain_optimizer_state = (
+                self.optimizer.state_dict()
+                if not full_refit
+                and steps > 0
+                and self.config.reuse_optimizer_state
+                and self.optimizer is not None
+                else None
+            )
             self._construct_model(
                 retain_model_state=(
                     previous_model_state if self.config.reuse_parameters and not first_fit else None
@@ -215,15 +219,7 @@ class ExactGPSurrogate:
                     if self.config.reuse_parameters and not first_fit
                     else None
                 ),
-                retain_optimizer_state=(
-                    previous_optimizer_state
-                    if (
-                        self.config.reuse_optimizer_state
-                        and not first_fit
-                        and (not full_refit or not self.config.reset_optimizer_on_full_refit)
-                    )
-                    else None
-                ),
+                retain_optimizer_state=retain_optimizer_state,
                 initialize_kernel=first_fit or not self.config.reuse_parameters,
             )
         else:
@@ -270,7 +266,6 @@ class ExactGPSurrogate:
         targets: torch.Tensor,
         *,
         transform_version: int,
-        optimizer_state: Mapping[str, Any] | None,
     ) -> str | None:
         """Append data through GPyTorch's exact cache update, or explain why it is inapplicable."""
 
@@ -342,10 +337,7 @@ class ExactGPSurrogate:
         self.train_continuous = scaled_continuous
         self.train_categorical = categorical
         self.train_targets = targets
-        optimizer = self._create_optimizer()
-        if self.config.reuse_optimizer_state and optimizer_state is not None:
-            optimizer.load_state_dict(dict(optimizer_state))
-        self.optimizer = optimizer
+        self.optimizer = self._create_optimizer()
         return None
 
     def _construct_model(
@@ -413,7 +405,7 @@ class ExactGPSurrogate:
         return torch.optim.Adam(
             self.model.parameters(),
             lr=self.config.learning_rate,
-            betas=(0.9, self.config.adam_beta2),
+            betas=(0.9, 0.99),
         )
 
     def _settings(self) -> ExitStack:

@@ -363,7 +363,7 @@ def test_fantasy_update_restores_model_state_and_propagates_failure(
     assert gp.diagnostics.counters["gp.fantasy_skipped"] == 0
 
 
-def test_fantasy_update_rebinds_adam_state_to_the_copied_model() -> None:
+def test_fantasy_update_binds_fresh_adam_to_the_copied_model() -> None:
     runtime = RuntimeConfig(seed=16)
     gp = ExactGPSurrogate(
         num_continuous=1,
@@ -384,14 +384,12 @@ def test_fantasy_update_rebinds_adam_state_to_the_copied_model() -> None:
     gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
     gp.predict(continuous[:1], categorical[:1])
     assert isinstance(gp.optimizer, torch.optim.Adam)
-    previous_steps = sorted(int(state["step"].item()) for state in gp.optimizer.state.values())
 
     report = gp.fit(continuous, categorical, targets, transform_version=1)
 
     assert report.kind == "fantasy_update"
     assert isinstance(gp.optimizer, torch.optim.Adam)
-    current_steps = sorted(int(state["step"].item()) for state in gp.optimizer.state.values())
-    assert current_steps == previous_steps
+    assert not gp.optimizer.state
     assert gp.model is not None
     assert {
         id(parameter) for group in gp.optimizer.param_groups for parameter in group["params"]
@@ -571,13 +569,8 @@ def test_scheduled_full_refit_cadence_resets_after_each_refit() -> None:
     assert gp.updates_since_full_refit == 1
 
 
-@pytest.mark.parametrize(
-    ("reset_optimizer_on_full_refit", "expected_steps"),
-    [(True, {1}), (False, {3})],
-)
-def test_scheduled_full_refit_applies_adam_state_policy(
-    reset_optimizer_on_full_refit: bool,
-    expected_steps: set[int],
+def test_default_update_avoids_adam_snapshot_and_full_refit_resets_state(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gp = ExactGPSurrogate(
         num_continuous=1,
@@ -587,7 +580,6 @@ def test_scheduled_full_refit_applies_adam_state_policy(
             update_steps=1,
             full_refit_interval=2,
             full_refit_growth_factor=None,
-            reset_optimizer_on_full_refit=reset_optimizer_on_full_refit,
             kernel_initialization_samples=16,
         ),
         runtime=RuntimeConfig(seed=5),
@@ -600,6 +592,11 @@ def test_scheduled_full_refit_applies_adam_state_policy(
     gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
     assert gp.optimizer is not None
     optimizer = gp.optimizer
+
+    def unexpected_snapshot() -> dict[str, object]:
+        raise AssertionError("default updates and full refits must not snapshot Adam state")
+
+    monkeypatch.setattr(optimizer, "state_dict", unexpected_snapshot)
     gp.fit(continuous[:4], categorical[:4], targets[:4], transform_version=2)
 
     assert gp.optimizer is optimizer
@@ -610,7 +607,35 @@ def test_scheduled_full_refit_applies_adam_state_policy(
 
     assert report.kind == "full_refit"
     assert gp.optimizer is not None and gp.optimizer is not optimizer
-    assert {int(state["step"].item()) for state in gp.optimizer.state.values()} == expected_steps
+    assert {int(state["step"].item()) for state in gp.optimizer.state.values()} == {1}
+
+
+def test_reconstructed_warm_update_transfers_adam_state() -> None:
+    gp = ExactGPSurrogate(
+        num_continuous=1,
+        category_sizes=(),
+        config=GPConfig(
+            initial_steps=1,
+            update_steps=1,
+            full_refit_interval=None,
+            full_refit_growth_factor=None,
+            use_set_train_data=False,
+            kernel_initialization_samples=16,
+        ),
+        runtime=RuntimeConfig(seed=5),
+        generator=make_generator("cpu", 5),
+    )
+    continuous = torch.linspace(0, 1, 4).reshape(-1, 1)
+    categorical = torch.empty((4, 0), dtype=torch.long)
+    targets = continuous[:, 0].square()
+    gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
+    assert gp.optimizer is not None
+    optimizer = gp.optimizer
+
+    gp.fit(continuous, categorical, targets, transform_version=1)
+
+    assert gp.optimizer is not None and gp.optimizer is not optimizer
+    assert {int(state["step"].item()) for state in gp.optimizer.state.values()} == {2}
 
 
 def test_disabled_optimizer_reuse_resets_state_on_warm_update() -> None:

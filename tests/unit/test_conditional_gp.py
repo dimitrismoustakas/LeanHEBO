@@ -388,13 +388,8 @@ def test_conditional_state_round_trip_reproduces_posterior() -> None:
     assert torch.equal(restored.train_activity, surrogate.train_activity)
 
 
-@pytest.mark.parametrize(
-    ("reset_optimizer_on_full_refit", "expected_steps"),
-    [(True, {1}), (False, {3})],
-)
-def test_conditional_full_refit_applies_adam_state_policy(
-    reset_optimizer_on_full_refit: bool,
-    expected_steps: set[int],
+def test_conditional_default_update_avoids_adam_snapshot_and_full_refit_resets_state(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     space = _branch_space()
     surrogate = ConditionalExactGPSurrogate(
@@ -404,7 +399,6 @@ def test_conditional_full_refit_applies_adam_state_policy(
             update_steps=1,
             full_refit_interval=2,
             full_refit_growth_factor=None,
-            reset_optimizer_on_full_refit=reset_optimizer_on_full_refit,
         ),
         runtime=RuntimeConfig(dtype="float64", seed=5),
         generator=torch.Generator().manual_seed(5),
@@ -428,6 +422,11 @@ def test_conditional_full_refit_applies_adam_state_policy(
     )
     assert surrogate.optimizer is not None
     optimizer = surrogate.optimizer
+
+    def unexpected_snapshot() -> dict[str, object]:
+        raise AssertionError("default updates and full refits must not snapshot Adam state")
+
+    monkeypatch.setattr(optimizer, "state_dict", unexpected_snapshot)
     surrogate.fit(
         encoded.continuous[:4],
         encoded.categorical[:4],
@@ -449,7 +448,51 @@ def test_conditional_full_refit_applies_adam_state_policy(
     assert report.kind == "full_refit"
     assert surrogate.optimizer is not None and surrogate.optimizer is not optimizer
     actual_steps = {int(state["step"].item()) for state in surrogate.optimizer.state.values()}
-    assert actual_steps == expected_steps
+    assert actual_steps == {1}
+
+
+def test_conditional_reconstructed_warm_update_transfers_adam_state() -> None:
+    space = _branch_space()
+    surrogate = ConditionalExactGPSurrogate(
+        space=space,
+        config=GPConfig(
+            initial_steps=1,
+            update_steps=1,
+            full_refit_interval=None,
+            full_refit_growth_factor=None,
+            use_set_train_data=False,
+        ),
+        runtime=RuntimeConfig(dtype="float64", seed=5),
+        generator=torch.Generator().manual_seed(5),
+    )
+    encoded = space.encode(
+        [
+            {"kind": "plain", "root": 0.0},
+            {"kind": "plain", "root": 1.0},
+            {"kind": "branch", "root": 0.2, "child": 0.1},
+            {"kind": "branch", "root": 0.8, "child": 0.9},
+        ]
+    )
+    targets = torch.tensor([1.0, 1.2, 0.8, 0.1], dtype=torch.float64)
+    surrogate.fit(
+        encoded.continuous[:3],
+        encoded.categorical[:3],
+        targets[:3],
+        transform_version=1,
+    )
+    assert surrogate.optimizer is not None
+    optimizer = surrogate.optimizer
+
+    surrogate.fit(
+        encoded.continuous,
+        encoded.categorical,
+        targets,
+        transform_version=1,
+    )
+
+    assert surrogate.optimizer is not None and surrogate.optimizer is not optimizer
+    actual_steps = {int(state["step"].item()) for state in surrogate.optimizer.state.values()}
+    assert actual_steps == {2}
 
 
 def test_any_condition_ignores_an_inactive_alternative_parent() -> None:
@@ -524,5 +567,7 @@ def test_conditional_fantasy_update_appends_internal_activity() -> None:
     )
 
     assert report.kind == "fantasy_update"
+    assert surrogate.optimizer is not None
+    assert not surrogate.optimizer.state
     assert surrogate.train_activity is not None
     assert surrogate.train_activity[:, 0].tolist() == [True, True, False, False]

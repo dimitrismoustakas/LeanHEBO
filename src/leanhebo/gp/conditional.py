@@ -358,9 +358,6 @@ class ConditionalExactGPSurrogate(ExactGPSurrogate):
         previous_likelihood_state = (
             self.likelihood.state_dict() if self.likelihood is not None else None
         )
-        previous_optimizer_state = (
-            self.optimizer.state_dict() if self.optimizer is not None else None
-        )
         transform_changed = self.transform_version != transform_version
 
         if self.config.use_fantasy_updates and not full_refit:
@@ -371,7 +368,6 @@ class ConditionalExactGPSurrogate(ExactGPSurrogate):
                 activity,
                 targets,
                 transform_version=transform_version,
-                optimizer_state=previous_optimizer_state,
             )
             if skip_reason is None:
                 self.transform_version = transform_version
@@ -402,6 +398,14 @@ class ConditionalExactGPSurrogate(ExactGPSurrogate):
         self.transform_version = transform_version
 
         if full_refit or not self.config.use_set_train_data or not self.config.reuse_parameters:
+            retain_optimizer_state = (
+                self.optimizer.state_dict()
+                if not full_refit
+                and steps > 0
+                and self.config.reuse_optimizer_state
+                and self.optimizer is not None
+                else None
+            )
             self._construct_conditional_model(
                 retain_model_state=(
                     previous_model_state if self.config.reuse_parameters and not first_fit else None
@@ -411,15 +415,7 @@ class ConditionalExactGPSurrogate(ExactGPSurrogate):
                     if self.config.reuse_parameters and not first_fit
                     else None
                 ),
-                retain_optimizer_state=(
-                    previous_optimizer_state
-                    if (
-                        self.config.reuse_optimizer_state
-                        and not first_fit
-                        and (not full_refit or not self.config.reset_optimizer_on_full_refit)
-                    )
-                    else None
-                ),
+                retain_optimizer_state=retain_optimizer_state,
                 initialize_kernel=first_fit or not self.config.reuse_parameters,
             )
         else:
@@ -456,7 +452,6 @@ class ConditionalExactGPSurrogate(ExactGPSurrogate):
         targets: torch.Tensor,
         *,
         transform_version: int,
-        optimizer_state: Mapping[str, Any] | None,
     ) -> str | None:
         if (
             self.model is None
@@ -531,8 +526,6 @@ class ConditionalExactGPSurrogate(ExactGPSurrogate):
         self.train_activity = activity
         self.train_targets = targets
         self.optimizer = self._create_optimizer()
-        if self.config.reuse_optimizer_state and optimizer_state is not None:
-            self.optimizer.load_state_dict(dict(optimizer_state))
         return None
 
     def _construct_conditional_model(

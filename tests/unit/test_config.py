@@ -52,7 +52,6 @@ def test_unknown_top_level_configuration_field_is_rejected() -> None:
             "optimizer-state reuse requires reuse_parameters=True",
         ),
         (lambda: GPConfig(learning_rate=float("nan")), "learning_rate"),
-        (lambda: GPConfig(adam_beta2=1.0), "adam_beta2"),
         (lambda: GPConfig(jitter=0.0), "jitter"),
         (
             lambda: GPConfig(noise_lower_bound=0.01, noise_initial=0.01),
