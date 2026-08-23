@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 import numpy as np
@@ -122,11 +122,21 @@ class CandidateBatch:
     categorical: torch.Tensor
     space_fingerprint: str
     decoded_columns: Mapping[str, Sequence[object]] | None = None
+    activity: torch.Tensor | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         _validate_tensors(self.continuous, self.categorical)
         if not isinstance(self.space_fingerprint, str) or not self.space_fingerprint:
             raise ValueError("space_fingerprint must be a non-empty string")
+        if self.activity is not None:
+            if not isinstance(self.activity, torch.Tensor):
+                raise TypeError("activity must be a torch.Tensor or None")
+            if self.activity.dtype != torch.bool or self.activity.ndim != 2:
+                raise TypeError("activity must be a rank-two Boolean tensor")
+            if self.activity.shape[0] != len(self):
+                raise ValueError("activity and encoded tensors must have the same row count")
+            if self.activity.device != self.device:
+                raise ValueError("activity and encoded tensors must share a device")
         if self.decoded_columns is not None:
             frozen_columns = {
                 str(name): tuple(values) for name, values in self.decoded_columns.items()
@@ -171,6 +181,7 @@ class CandidateBatch:
             encoded.categorical,
             self.space_fingerprint,
             self.decoded_columns,
+            None if self.activity is None else self.activity.to(device=encoded.device),
         )
 
     def select(self, rows: torch.Tensor | slice | Sequence[int]) -> CandidateBatch:
@@ -189,11 +200,16 @@ class CandidateBatch:
                 name: tuple(values[index] for index in indices)
                 for name, values in self.decoded_columns.items()
             }
+        activity = None
+        if self.activity is not None:
+            index = torch.tensor(indices, dtype=torch.int64, device=self.activity.device)
+            activity = self.activity.index_select(0, index)
         return CandidateBatch(
             encoded.continuous,
             encoded.categorical,
             self.space_fingerprint,
             columns,
+            activity,
         )
 
     def to_dense(self) -> torch.Tensor:
@@ -205,6 +221,18 @@ class CandidateBatch:
         if self.decoded_columns is None:
             raise ValueError("this CandidateBatch has no decoded column metadata")
         names = tuple(self.decoded_columns)
+        if self.activity is not None:
+            if self.activity.shape[1] != len(names):
+                raise ValueError("activity columns do not match decoded column metadata")
+            active = self.activity.detach().to(device="cpu")
+            return [
+                {
+                    name: self.decoded_columns[name][row]
+                    for column, name in enumerate(names)
+                    if bool(active[row, column])
+                }
+                for row in range(len(self))
+            ]
         return [
             {name: self.decoded_columns[name][row] for name in names} for row in range(len(self))
         ]

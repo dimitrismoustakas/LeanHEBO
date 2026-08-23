@@ -10,6 +10,7 @@ from typing import Any, TypeAlias, cast
 import numpy as np
 
 Columns: TypeAlias = dict[str, list[object]]
+Records: TypeAlias = list[dict[str, object]]
 _UNSUPPORTED_INPUT = (
     "unsupported input type; expected records, a column mapping, NumPy, Pandas, or Polars"
 )
@@ -109,4 +110,52 @@ def columns_from_input(value: object, names: Sequence[str]) -> Columns:
     return columns
 
 
-__all__ = ["columns_from_input"]
+def records_from_input(value: object, names: Sequence[str]) -> Records:
+    """Convert boundary data to records while permitting absent mapping fields."""
+
+    expected = tuple(names)
+    expected_set = set(expected)
+    if isinstance(value, Mapping):
+        unknown = sorted(str(name) for name in set(value).difference(expected_set))
+        if unknown:
+            raise ValueError(f"mapping input contains unknown columns: {unknown}")
+        present = tuple(name for name in expected if name in value)
+        selected = [value[name] for name in present]
+        column_flags = [_is_column_like(item) for item in selected]
+        if any(column_flags) and not all(column_flags):
+            raise ValueError("mapping input cannot mix scalar values and column sequences")
+        if selected and all(column_flags):
+            columns = {name: _column_to_list(value[name]) for name in present}
+            _validate_lengths(columns)
+            row_count = len(next(iter(columns.values())))
+            return [{name: columns[name][row] for name in present} for row in range(row_count)]
+        return [{name: value[name] for name in present}]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        if not value:
+            return []
+        if not all(isinstance(row, Mapping) for row in value):
+            raise TypeError(_UNSUPPORTED_INPUT)
+        for row_number, row in enumerate(cast(Sequence[Mapping[str, object]], value)):
+            unknown = sorted(str(name) for name in set(row).difference(expected_set))
+            if unknown:
+                raise ValueError(f"record {row_number} contains unknown columns: {unknown}")
+        return [
+            {name: row[name] for name in expected if name in row}
+            for row in cast(Sequence[Mapping[str, object]], value)
+        ]
+    if isinstance(value, np.ndarray) and value.dtype.names is not None:
+        unknown = sorted(set(value.dtype.names).difference(expected_set))
+        if unknown:
+            raise ValueError(f"NumPy structured array contains unknown columns: {unknown}")
+    if type(value).__module__.split(".", 1)[0] in {"pandas", "polars"}:
+        unknown = sorted(set(cast(Any, value).columns).difference(expected_set))
+        if unknown:
+            raise ValueError(f"tabular input contains unknown columns: {unknown}")
+    columns = columns_from_input(value, expected)
+    if not columns:
+        return []
+    row_count = len(next(iter(columns.values())))
+    return [{name: columns[name][row] for name in expected} for row in range(row_count)]
+
+
+__all__ = ["columns_from_input", "records_from_input"]

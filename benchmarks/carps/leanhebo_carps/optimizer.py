@@ -9,6 +9,19 @@ from typing import TYPE_CHECKING, Any, cast
 from carps.optimizers.optimizer import Optimizer
 from carps.utils.trials import TrialInfo, TrialValue
 from ConfigSpace import Configuration, ConfigurationSpace
+from ConfigSpace.conditions import (
+    AndConjunction,
+    Conjunction,
+    EqualsCondition,
+    GreaterThanCondition,
+    InCondition,
+    LessThanCondition,
+    NotEqualsCondition,
+    OrConjunction,
+)
+from ConfigSpace.conditions import (
+    Condition as ConfigSpaceCondition,
+)
 from ConfigSpace.hyperparameters import (
     CategoricalHyperparameter,
     Constant,
@@ -20,7 +33,23 @@ from ConfigSpace.hyperparameters import (
 
 from leanhebo import LeanHEBO, LeanHEBOConfig
 from leanhebo.data import CandidateBatch
-from leanhebo.space import Categorical, Float, Integer, Parameter, Space
+from leanhebo.space import (
+    All,
+    Categorical,
+    Condition,
+    Eq,
+    Float,
+    GreaterThan,
+    In,
+    Integer,
+    LessThan,
+    NotEqual,
+    Parameter,
+    Space,
+)
+from leanhebo.space import (
+    Any as AnyCondition,
+)
 
 if TYPE_CHECKING:
     from carps.loggers.abstract_logger import AbstractLogger
@@ -45,8 +74,6 @@ class LeanHEBOOptimizer(Optimizer):
             raise ValueError("LeanHEBO does not support multi-fidelity tasks")
 
         self.configspace = task.input_space.configuration_space
-        if self.configspace.conditions:
-            raise ValueError("LeanHEBO does not support conditional search spaces")
         if self.configspace.forbidden_clauses:
             raise ValueError("LeanHEBO does not support forbidden clauses")
 
@@ -61,24 +88,78 @@ class LeanHEBOOptimizer(Optimizer):
         self._incumbent: tuple[TrialInfo, TrialValue] | None = None
 
     def convert_configspace(self, configspace: ConfigurationSpace) -> Space:
+        for hyperparameter in configspace.values():
+            if isinstance(hyperparameter, OrdinalHyperparameter):
+                self._ordinals[hyperparameter.name] = tuple(hyperparameter.sequence)
+
         parameters: list[Parameter] = []
         for hyperparameter in configspace.values():
-            parameters.append(self._convert_hyperparameter(hyperparameter))
+            conditions = configspace.parent_conditions_of[hyperparameter.name]
+            active_when = self._convert_conditions(conditions)
+            parameters.append(self._convert_hyperparameter(hyperparameter, active_when))
         return Space(*parameters)
 
-    def _convert_hyperparameter(self, hp: Hyperparameter) -> Parameter:
+    def _convert_conditions(
+        self,
+        conditions: Sequence[ConfigSpaceCondition | Conjunction],
+    ) -> Condition | None:
+        return None if not conditions else self._convert_condition(conditions[0])
+
+    def _convert_condition(
+        self,
+        condition: ConfigSpaceCondition | Conjunction,
+    ) -> Condition:
+        if isinstance(condition, AndConjunction):
+            return All(*(self._convert_condition(child) for child in condition.components))
+        if isinstance(condition, OrConjunction):
+            return AnyCondition(*(self._convert_condition(child) for child in condition.components))
+
+        parent = condition.parent.name
+        if isinstance(condition, InCondition):
+            return In(parent, (self._condition_value(parent, value) for value in condition.values))
+        value = self._condition_value(parent, condition.value)
+        if isinstance(condition, EqualsCondition):
+            return Eq(parent, value)
+        if isinstance(condition, NotEqualsCondition):
+            return NotEqual(parent, value)
+        if isinstance(condition, LessThanCondition):
+            return LessThan(parent, value)
+        if isinstance(condition, GreaterThanCondition):
+            return GreaterThan(parent, value)
+        raise TypeError(f"unsupported ConfigSpace condition: {type(condition).__name__}")
+
+    def _condition_value(self, name: str, value: object) -> object:
+        sequence = self._ordinals.get(name)
+        return sequence.index(value) if sequence is not None else value
+
+    def _convert_hyperparameter(
+        self,
+        hp: Hyperparameter,
+        active_when: Condition | None,
+    ) -> Parameter:
         if isinstance(hp, UniformFloatHyperparameter):
-            return Float(hp.name, float(hp.lower), float(hp.upper), log=hp.log)
+            return Float(
+                hp.name,
+                float(hp.lower),
+                float(hp.upper),
+                log=hp.log,
+                active_when=active_when,
+            )
         if isinstance(hp, UniformIntegerHyperparameter):
-            return Integer(hp.name, int(hp.lower), int(hp.upper), log=hp.log)
+            return Integer(
+                hp.name,
+                int(hp.lower),
+                int(hp.upper),
+                log=hp.log,
+                active_when=active_when,
+            )
         if isinstance(hp, CategoricalHyperparameter):
-            return Categorical(hp.name, tuple(hp.choices))
+            return Categorical(hp.name, tuple(hp.choices), active_when=active_when)
         if isinstance(hp, OrdinalHyperparameter):
-            sequence = tuple(hp.sequence)
-            self._ordinals[hp.name] = sequence
-            return Integer(hp.name, 0, len(sequence) - 1)
+            sequence = self._ordinals[hp.name]
+            return Integer(hp.name, 0, len(sequence) - 1, active_when=active_when)
         if isinstance(hp, Constant):
-            return Categorical(hp.name, (hp.value,))
+            return Categorical(hp.name, (hp.value,), active_when=active_when)
         raise TypeError(f"unsupported ConfigSpace parameter: {type(hp).__name__}")
 
     def _setup_optimizer(self) -> LeanHEBO:
@@ -95,7 +176,8 @@ class LeanHEBOOptimizer(Optimizer):
             raise ValueError(f"CARP-S requires one suggestion, got {len(records)}")
         values = records[0]
         for name, sequence in self._ordinals.items():
-            values[name] = sequence[cast(int, values[name])]
+            if name in values:
+                values[name] = sequence[cast(int, values[name])]
         config = Configuration(configuration_space=self.configspace, values=values)
         return TrialInfo(config=config)
 
@@ -107,7 +189,8 @@ class LeanHEBOOptimizer(Optimizer):
 
         values = dict(trial_info.config)
         for name, sequence in self._ordinals.items():
-            values[name] = sequence.index(values[name])
+            if name in values:
+                values[name] = sequence.index(values[name])
         cost = float(trial_value.cost)
         self.solver.observe([values], [cost])
         if self._incumbent is None or cost < float(self._incumbent[1].cost):

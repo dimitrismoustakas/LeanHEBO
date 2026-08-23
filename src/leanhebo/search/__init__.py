@@ -3,6 +3,12 @@
 
 """Dense, tensor-native mixed-variable NSGA-II search."""
 
+from leanhebo.search.conditional import (
+    ConditionalTorchNSGA2,
+    eliminate_semantic_duplicates,
+    semantic_duplicate_mask,
+)
+from leanhebo.search.conditional_operators import conditional_mutation
 from leanhebo.search.duplicates import (
     duplicate_mask,
     eliminate_duplicates,
@@ -31,6 +37,7 @@ from leanhebo.search.survival import (
 )
 
 __all__ = [
+    "ConditionalTorchNSGA2",
     "MixedVariableSpec",
     "NSGA2Result",
     "SurvivalResult",
@@ -38,10 +45,12 @@ __all__ = [
     "TorchNSGA2",
     "binary_tournament",
     "categorical_mutation",
+    "conditional_mutation",
     "crowding_distance",
     "dominance_matrix",
     "duplicate_mask",
     "eliminate_duplicates",
+    "eliminate_semantic_duplicates",
     "elitist_survival",
     "mixed_variable_crossover",
     "mutate_population",
@@ -50,5 +59,6 @@ __all__ = [
     "repair_population",
     "sbx_crossover",
     "select_survivors",
+    "semantic_duplicate_mask",
     "uniform_categorical_crossover",
 ]

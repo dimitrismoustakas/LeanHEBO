@@ -2,8 +2,8 @@
 
 LeanHEBO implements the single-objective, exact-GP path of HEBO with Torch-backed numerical
 state and compute. It supports bounded floats (linear or logarithmic), integers (linear, stepped,
-logarithmic, or powers of a base), Boolean values, and categorical variables, including batched
-and contextual suggestions.
+logarithmic, or powers of a base), Boolean values, and categorical variables, including conditional
+dependencies, batched suggestions, and contextual values.
 
 This is an independent alpha project, not a new optimization algorithm and not affiliated with
 Huawei. See [NOTICE.md](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/NOTICE.md)
@@ -82,6 +82,30 @@ candidates = optimizer.suggest(8, fix_input={"use_bias": True})
 
 Non-finite outcomes are dropped by default. Set `nonfinite_policy="raise"` in
 `LeanHEBOConfig` to reject them instead.
+
+## Conditional spaces
+
+Attach an `active_when` condition to each child parameter:
+
+```python
+from leanhebo import LeanHEBO
+from leanhebo.space import Categorical, Eq, Float, In, Integer, Space
+
+space = Space(
+    Categorical("booster", ("gblinear", "gbtree", "dart")),
+    Float("reg_lambda", 1e-4, 1.0, log=True),
+    Integer("max_depth", 2, 12, active_when=In("booster", ("gbtree", "dart"))),
+    Float("rate_drop", 0.0, 1.0, active_when=Eq("booster", "dart")),
+)
+optimizer = LeanHEBO(space)
+candidates = optimizer.suggest(8, fix_input={"rate_drop": 0.2})
+records = candidates.to_records()
+```
+
+`to_records()` returns sparse rows and omits inactive parameters. The encoded candidate tensors
+remain rectangular; `candidates.activity` is their Boolean parameter-activity matrix. Fixing
+`rate_drop` supplies its value whenever it is active, but does not force `booster="dart"`; other
+branches still omit it.
 
 ## Runtime and checkpoints
 

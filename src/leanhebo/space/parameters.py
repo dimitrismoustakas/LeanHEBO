@@ -14,12 +14,14 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from numbers import Real
 from types import MappingProxyType
 from typing import Any, ClassVar, TypeAlias, cast
 
 import torch
+
+from leanhebo.space.conditions import Condition, condition_from_spec, normalize_condition
 
 Primitive: TypeAlias = str | int | float | bool | None
 
@@ -47,15 +49,20 @@ def _as_integer(value: object, *, parameter: str) -> int:
     return int(numeric)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class Parameter(ABC):
     """Base class shared by all public parameter types."""
 
     name: str
+    active_when: Condition | None = field(default=None, kw_only=True, repr=False)
     type_name: ClassVar[str]
 
     def __post_init__(self) -> None:
         _validate_name(self.name)
+        if self.active_when is not None and not isinstance(self.active_when, Condition):
+            raise TypeError("active_when must be a Condition or None")
+        if self.active_when is not None:
+            object.__setattr__(self, "active_when", normalize_condition(self.active_when))
 
     @property
     @abstractmethod
@@ -87,8 +94,21 @@ class Parameter(ABC):
     def to_spec(self) -> dict[str, object]:
         """Return a checkpoint-friendly schema description."""
 
+    def _with_condition(self, specification: dict[str, object]) -> dict[str, object]:
+        if self.active_when is not None:
+            specification["active_when"] = self.active_when.to_spec()
+        return specification
 
-@dataclass(frozen=True, slots=True)
+    def __repr__(self) -> str:
+        arguments = [
+            f"{item.name}={getattr(self, item.name)!r}" for item in fields(self) if item.repr
+        ]
+        if self.active_when is not None:
+            arguments.append(f"active_when={self.active_when!r}")
+        return f"{type(self).__name__}({', '.join(arguments)})"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class Float(Parameter):
     """A bounded real parameter, optionally optimized on a logarithmic scale."""
 
@@ -146,17 +166,19 @@ class Float(Parameter):
         return tuple(decoded.tolist())
 
     def to_spec(self) -> dict[str, object]:
-        return {
-            "name": self.name,
-            "type": self.type_name,
-            "low": self.low,
-            "high": self.high,
-            "log": self.log,
-            "base": self.base,
-        }
+        return self._with_condition(
+            {
+                "name": self.name,
+                "type": self.type_name,
+                "low": self.low,
+                "high": self.high,
+                "log": self.log,
+                "base": self.base,
+            }
+        )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class Integer(Parameter):
     """A bounded integer parameter with HEBO-compatible transform variants.
 
@@ -305,19 +327,21 @@ class Integer(Parameter):
         return tuple(int(value) for value in decoded.tolist())
 
     def to_spec(self) -> dict[str, object]:
-        return {
-            "name": self.name,
-            "type": self.type_name,
-            "low": self.low,
-            "high": self.high,
-            "step": self.step,
-            "log": self.log,
-            "base": self.base,
-            "exponent": self.exponent,
-        }
+        return self._with_condition(
+            {
+                "name": self.name,
+                "type": self.type_name,
+                "low": self.low,
+                "high": self.high,
+                "step": self.step,
+                "log": self.log,
+                "base": self.base,
+                "exponent": self.exponent,
+            }
+        )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class Categorical(Parameter):
     """A finite categorical parameter stored as an integer code."""
 
@@ -383,10 +407,12 @@ class Categorical(Parameter):
         return tuple(self.categories[code] for code in codes.tolist())
 
     def to_spec(self) -> dict[str, object]:
-        return {"name": self.name, "type": self.type_name, "categories": list(self.categories)}
+        return self._with_condition(
+            {"name": self.name, "type": self.type_name, "categories": list(self.categories)}
+        )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class Bool(Parameter):
     """A Boolean parameter stored in the categorical tensor as code 0 or 1."""
 
@@ -424,7 +450,7 @@ class Bool(Parameter):
         return tuple(bool(code) for code in codes.tolist())
 
     def to_spec(self) -> dict[str, object]:
-        return {"name": self.name, "type": self.type_name}
+        return self._with_condition({"name": self.name, "type": self.type_name})
 
 
 ParameterLike: TypeAlias = Float | Integer | Categorical | Bool
@@ -439,14 +465,18 @@ def parameter_from_spec(spec: dict[str, Any]) -> ParameterLike:
         name = str(item.pop("name"))
     except KeyError as error:
         raise ValueError(f"missing parameter-spec field: {error.args[0]}") from error
+    active_spec = item.pop("active_when", None)
+    if active_spec is not None and not isinstance(active_spec, Mapping):
+        raise TypeError("active_when parameter specs must be mappings")
+    active_when = None if active_spec is None else condition_from_spec(active_spec)
     if type_name == "float":
-        return Float(name, **item)
+        return Float(name, active_when=active_when, **item)
     if type_name == "integer":
-        return Integer(name, **item)
+        return Integer(name, active_when=active_when, **item)
     if type_name == "categorical":
-        return Categorical(name, **item)
+        return Categorical(name, active_when=active_when, **item)
     if type_name == "bool":
         if item:
             raise ValueError(f"unexpected Boolean parameter fields: {sorted(item)}")
-        return Bool(name)
+        return Bool(name, active_when=active_when)
     raise ValueError(f"unsupported parameter type {type_name!r}")

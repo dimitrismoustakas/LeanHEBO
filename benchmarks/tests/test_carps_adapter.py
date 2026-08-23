@@ -21,6 +21,7 @@ from leanhebo_carps import timing
 from leanhebo_carps.optimizer import LeanHEBOOptimizer
 
 from leanhebo.space import Categorical as LeanCategorical
+from leanhebo.space import Eq as LeanEq
 from leanhebo.space import Float as LeanFloat
 from leanhebo.space import Integer as LeanInteger
 
@@ -73,14 +74,24 @@ def test_mixed_space_round_trip_and_incumbent() -> None:
     assert incumbent[1].cost == 1.0
 
 
-def test_conditional_space_is_rejected() -> None:
+def test_conditional_space_round_trip() -> None:
     parent = CategoricalHyperparameter("model", ["a", "b"])
     child = UniformFloatHyperparameter("rate", lower=0.0, upper=1.0)
     configspace = ConfigurationSpace()
     configspace.add([parent, child, EqualsCondition(child, parent, "a")])
 
-    with pytest.raises(ValueError, match="conditional"):
-        LeanHEBOOptimizer(_task(configspace), seed=7)
+    optimizer = LeanHEBOOptimizer(_task(configspace), seed=7)
+    converted = {parameter.name: parameter for parameter in optimizer.leanhebo_space.parameters}
+    assert converted["rate"].active_when == LeanEq("model", "a")
+
+    compiled = optimizer.leanhebo_space.compile()
+    active = compiled.decode(compiled.encode([{"model": "a", "rate": 0.25}]))
+    inactive = compiled.decode(compiled.encode([{"model": "b"}]))
+    active_trial = optimizer.convert_to_trial(active)
+    inactive_trial = optimizer.convert_to_trial(inactive)
+
+    assert dict(active_trial.config) == {"model": "a", "rate": pytest.approx(0.25)}
+    assert dict(inactive_trial.config) == {"model": "b"}
 
 
 class _Logger:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import replace
+from itertools import islice
 from pathlib import Path
 from typing import Any, Self, cast
 
@@ -20,9 +21,15 @@ from leanhebo.data import CandidateBatch, EncodedBatch
 from leanhebo.data.store import ObservationStore
 from leanhebo.diagnostics import Diagnostics, FitReport
 from leanhebo.errors import CheckpointError, SearchSpaceExhaustedError
-from leanhebo.gp import ExactGPSurrogate
+from leanhebo.gp import ConditionalExactGPSurrogate, ExactGPSurrogate
 from leanhebo.runtime.rng import RandomStreams
-from leanhebo.search import MixedVariableSpec, NSGA2Result, TorchNSGA2
+from leanhebo.search import (
+    ConditionalTorchNSGA2,
+    MixedVariableSpec,
+    NSGA2Result,
+    TorchNSGA2,
+    eliminate_semantic_duplicates,
+)
 from leanhebo.space import (
     Bool,
     Categorical,
@@ -34,6 +41,71 @@ from leanhebo.space import (
     Space,
 )
 from leanhebo.transforms import OutputTransform
+
+
+class _CompiledConditionalSearchSemantics:
+    """Bind compiled conditional semantics and a fixed context to one search call."""
+
+    def __init__(
+        self,
+        space: CompiledSpace,
+        fixed: FixedInput | None,
+        *,
+        device: torch.device,
+    ) -> None:
+        semantics = space.conditional_semantics
+        if semantics is None:
+            raise ValueError("conditional search semantics require a conditional space")
+        self.space = space
+        self.fixed = fixed
+        self._semantics = semantics
+        dense_parameter_indices = (
+            semantics.continuous_parameter_indices + semantics.categorical_parameter_indices
+        )
+        self._dense_parameter_indices = torch.tensor(
+            dense_parameter_indices,
+            dtype=torch.int64,
+            device=device,
+        )
+
+    def _encoded(self, population: torch.Tensor) -> EncodedBatch:
+        values = population.to(dtype=self.space.dtype)
+        return EncodedBatch(
+            values[:, : self.space.n_continuous],
+            values[:, self.space.n_continuous :].to(torch.int64),
+        )
+
+    def activity_mask(self, population: torch.Tensor) -> torch.Tensor:
+        activity = self._semantics.activity(self._encoded(population)).parameter
+        return activity.index_select(1, self._dense_parameter_indices)
+
+    def semantic_keys(self, population: torch.Tensor) -> torch.Tensor:
+        return self._semantics.key_tensor(self._encoded(population))
+
+    def finite_completion(self, count: int, *, existing: torch.Tensor) -> torch.Tensor:
+        if count <= 0 or not self.space.context_is_finite(self.fixed):
+            return existing.new_empty((0, self.space.dense_dimension))
+
+        completed = existing.new_empty((0, self.space.dense_dimension))
+        records = self.space.iter_contextual_records(self.fixed)
+        chunk_size = max(64, min(1024, count * 4))
+        while completed.shape[0] < count:
+            chunk = list(islice(records, chunk_size))
+            if not chunk:
+                break
+            encoded = self.space.encode(chunk).to(existing.device, dtype=existing.dtype)
+            if self.fixed is not None:
+                encoded = self.space.apply_fixed(encoded, self.fixed)
+            candidates = eliminate_semantic_duplicates(
+                encoded.to_dense(),
+                self,
+                existing=torch.cat((existing, completed), dim=0),
+            )
+            completed = torch.cat(
+                (completed, candidates[: count - completed.shape[0]]),
+                dim=0,
+            )
+        return completed
 
 
 class LeanHEBO:
@@ -166,6 +238,14 @@ class LeanHEBO:
         return fixed
 
     def _make_surrogate(self) -> ExactGPSurrogate:
+        if self.space.is_conditional:
+            return ConditionalExactGPSurrogate(
+                space=self.space,
+                config=self.config.gp,
+                runtime=self.config.runtime,
+                generator=self.random.model,
+                diagnostics=self.diagnostics,
+            )
         category_sizes = tuple(
             round(parameter.optimization_bounds[1] - parameter.optimization_bounds[0]) + 1
             for parameter in self.space.categorical_parameters
@@ -237,17 +317,37 @@ class LeanHEBO:
             encoded = self.space.encoded_from_dense(dense, repair=True, fixed=fixed)
             return mace(encoded.continuous, encoded.categorical)
 
-        search = TorchNSGA2(
-            self._search_spec(fixed),
-            population_size=self.config.search.population_size,
-            generations=self.config.search.generations,
-            crossover_probability=self.config.search.crossover_probability,
-            crossover_eta=self.config.search.crossover_eta,
-            mutation_probability=self.config.search.mutation_probability,
-            mutation_eta=self.config.search.mutation_eta,
-            tournament_size=self.config.search.tournament_size,
-            eliminate_duplicate_points=self.config.search.eliminate_duplicates,
-        )
+        search_spec = self._search_spec(fixed)
+        search: TorchNSGA2
+        if self.space.is_conditional:
+            search = ConditionalTorchNSGA2(
+                search_spec,
+                _CompiledConditionalSearchSemantics(
+                    self.space,
+                    fixed,
+                    device=self.device,
+                ),
+                population_size=self.config.search.population_size,
+                generations=self.config.search.generations,
+                crossover_probability=self.config.search.crossover_probability,
+                crossover_eta=self.config.search.crossover_eta,
+                mutation_probability=self.config.search.mutation_probability,
+                mutation_eta=self.config.search.mutation_eta,
+                tournament_size=self.config.search.tournament_size,
+                eliminate_duplicate_points=self.config.search.eliminate_duplicates,
+            )
+        else:
+            search = TorchNSGA2(
+                search_spec,
+                population_size=self.config.search.population_size,
+                generations=self.config.search.generations,
+                crossover_probability=self.config.search.crossover_probability,
+                crossover_eta=self.config.search.crossover_eta,
+                mutation_probability=self.config.search.mutation_probability,
+                mutation_eta=self.config.search.mutation_eta,
+                tournament_size=self.config.search.tournament_size,
+                eliminate_duplicate_points=self.config.search.eliminate_duplicates,
+            )
         previous = (
             self._previous_population if self.config.search.reuse_previous_population else None
         )
@@ -286,14 +386,41 @@ class LeanHEBO:
         observations = self.store._materialize_view()
         eligible = torch.ones(len(observations), dtype=torch.bool, device=self.device)
         if fixed is not None:
-            if fixed.continuous_indices.numel():
-                indices = fixed.continuous_indices.to(self.device)
-                values = fixed.continuous_values.to(self.device, dtype=self.dtype)
-                eligible &= (observations.continuous[:, indices] == values).all(dim=1)
-            if fixed.categorical_indices.numel():
-                indices = fixed.categorical_indices.to(self.device)
-                values = fixed.categorical_values.to(self.device)
-                eligible &= (observations.categorical[:, indices] == values).all(dim=1)
+            if self.space.is_conditional:
+                semantics = self.space.conditional_semantics
+                assert semantics is not None
+                parameter_activity = semantics.activity(observations.encoded).parameter
+                if fixed.continuous_indices.numel():
+                    indices = fixed.continuous_indices.to(self.device)
+                    values = fixed.continuous_values.to(self.device, dtype=self.dtype)
+                    parameter_indices = torch.tensor(
+                        semantics.continuous_parameter_indices,
+                        dtype=torch.int64,
+                        device=self.device,
+                    ).index_select(0, indices)
+                    active = parameter_activity.index_select(1, parameter_indices)
+                    matches = observations.continuous[:, indices] == values
+                    eligible &= ((~active) | matches).all(dim=1)
+                if fixed.categorical_indices.numel():
+                    indices = fixed.categorical_indices.to(self.device)
+                    values = fixed.categorical_values.to(self.device)
+                    parameter_indices = torch.tensor(
+                        semantics.categorical_parameter_indices,
+                        dtype=torch.int64,
+                        device=self.device,
+                    ).index_select(0, indices)
+                    active = parameter_activity.index_select(1, parameter_indices)
+                    matches = observations.categorical[:, indices] == values
+                    eligible &= ((~active) | matches).all(dim=1)
+            else:
+                if fixed.continuous_indices.numel():
+                    indices = fixed.continuous_indices.to(self.device)
+                    values = fixed.continuous_values.to(self.device, dtype=self.dtype)
+                    eligible &= (observations.continuous[:, indices] == values).all(dim=1)
+                if fixed.categorical_indices.numel():
+                    indices = fixed.categorical_indices.to(self.device)
+                    values = fixed.categorical_values.to(self.device)
+                    eligible &= (observations.categorical[:, indices] == values).all(dim=1)
             if not bool(eligible.any()):
                 eligible.fill_(True)
         scores = torch.where(eligible, observations.y, torch.inf)
@@ -375,9 +502,13 @@ class LeanHEBO:
             seen.update(self.space.canonical_keys(initial))
         retained = sum(len(batch) for batch in encoded_rows)
         fixed_values = {} if fixed is None else dict(fixed.decoded_values)
-        finite_domain = all(
-            self._finite_cardinality(parameter, fixed_values) is not None
-            for parameter in self.space.parameters
+        finite_domain = (
+            self.space.context_is_finite(fixed)
+            if self.space.is_conditional
+            else all(
+                self._finite_cardinality(parameter, fixed_values) is not None
+                for parameter in self.space.parameters
+            )
         )
         while retained < requested:
             missing = requested - retained
@@ -483,6 +614,8 @@ class LeanHEBO:
 
         if requested == 0:
             return []
+        if self.space.is_conditional:
+            return self._conditional_finite_unseen(requested, fixed, seen)
         fixed_values = {} if fixed is None else dict(fixed.decoded_values)
         cardinalities: list[int] = []
         for parameter in self.space.parameters:
@@ -532,6 +665,38 @@ class LeanHEBO:
                 completed_count += len(keep)
             if completed_count == requested:
                 break
+        return completed
+
+    def _conditional_finite_unseen(
+        self,
+        requested: int,
+        fixed: FixedInput | None,
+        seen: set[tuple[int, ...]],
+    ) -> list[EncodedBatch]:
+        blocked = set(self.store.key_snapshot()) | seen
+        completed: list[EncodedBatch] = []
+        completed_count = 0
+        records = self.space.iter_contextual_records(fixed)
+        chunk_size = max(64, min(1024, requested * 4))
+        while completed_count < requested:
+            chunk = list(islice(records, chunk_size))
+            if not chunk:
+                break
+            encoded = self.space.encode(chunk).to(self.device, dtype=self.dtype)
+            if fixed is not None:
+                encoded = self.space.apply_fixed(encoded, fixed)
+            keep: list[int] = []
+            for index, key in enumerate(self.space.canonical_keys(encoded)):
+                if key in blocked:
+                    continue
+                keep.append(index)
+                blocked.add(key)
+                seen.add(key)
+                if len(keep) + completed_count == requested:
+                    break
+            if keep:
+                completed.append(encoded.select(keep))
+                completed_count += len(keep)
         return completed
 
     def observe(self, candidates: CandidateBatch | EncodedBatch | object, y: object) -> int:

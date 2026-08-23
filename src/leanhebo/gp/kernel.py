@@ -57,6 +57,24 @@ def build_kernel(
 ) -> gpytorch.kernels.ScaleKernel:
     """Construct the product Matérn-3/2 covariance used by the main HEBO GP path."""
 
+    return gpytorch.kernels.ScaleKernel(
+        build_base_kernel(
+            num_continuous=num_continuous,
+            feature_extractor=feature_extractor,
+            ard=ard,
+        ),
+        outputscale_prior=gpytorch.priors.GammaPrior(0.5, 0.5),
+    )
+
+
+def build_base_kernel(
+    *,
+    num_continuous: int,
+    feature_extractor: MixedFeatureExtractor,
+    ard: bool,
+) -> gpytorch.kernels.Kernel:
+    """Construct the unit-diagonal mixed Matérn base without an output scale."""
+
     components: list[gpytorch.kernels.Kernel] = []
     if num_continuous:
         components.append(
@@ -75,13 +93,7 @@ def build_kernel(
         )
     if not components:
         raise ValueError("an exact GP requires at least one non-fixed input dimension")
-    base: gpytorch.kernels.Kernel = (
-        components[0] if len(components) == 1 else gpytorch.kernels.ProductKernel(*components)
-    )
-    return gpytorch.kernels.ScaleKernel(
-        base,
-        outputscale_prior=gpytorch.priors.GammaPrior(0.5, 0.5),
-    )
+    return components[0] if len(components) == 1 else gpytorch.kernels.ProductKernel(*components)
 
 
 def initialize_numeric_lengthscales(
@@ -96,7 +108,27 @@ def initialize_numeric_lengthscales(
 
     if continuous.shape[1] == 0 or not isinstance(kernel.base_kernel, gpytorch.kernels.Kernel):
         return
-    base = kernel.base_kernel
+    initialize_base_numeric_lengthscales(
+        kernel.base_kernel,
+        continuous,
+        sample_limit=sample_limit,
+        lower_bound=lower_bound,
+        generator=generator,
+    )
+
+
+def initialize_base_numeric_lengthscales(
+    base: gpytorch.kernels.Kernel,
+    continuous: torch.Tensor,
+    *,
+    sample_limit: int,
+    lower_bound: float,
+    generator: torch.Generator,
+) -> None:
+    """Initialize an unscaled mixed base from numeric pairwise distances."""
+
+    if continuous.shape[1] == 0:
+        return
     numeric: gpytorch.kernels.MaternKernel | None = None
     if isinstance(base, gpytorch.kernels.MaternKernel):
         if base.ard_num_dims is not None:

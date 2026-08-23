@@ -8,16 +8,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from numbers import Real
 from typing import Literal, TypeAlias, cast
 
 import torch
 
-from leanhebo.data.adapters import columns_from_input
+from leanhebo.data.adapters import columns_from_input, records_from_input
 from leanhebo.data.batch import CandidateBatch, EncodedBatch
 from leanhebo.errors import SpaceMismatchError
+from leanhebo.space.conditional import ConditionalSemantics
 from leanhebo.space.parameters import Bool, Categorical, Float, Integer, ParameterLike
 
 ExternalBatch: TypeAlias = object
@@ -130,6 +131,11 @@ class CompiledSpace:
     _name_positions: dict[str, tuple[Literal["continuous", "categorical"], int]] = field(
         init=False, repr=False, compare=False
     )
+    _conditional_semantics: ConditionalSemantics | None = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         parameters = tuple(self.parameters)
@@ -191,6 +197,15 @@ class CompiledSpace:
         )
         object.__setattr__(self, "categorical_mask", categorical_mask)
         object.__setattr__(self, "rounding_mask", rounding_mask)
+        object.__setattr__(
+            self,
+            "_conditional_semantics",
+            (
+                ConditionalSemantics.compile(parameters, dtype=dtype)
+                if any(parameter.active_when is not None for parameter in parameters)
+                else None
+            ),
+        )
 
     def __len__(self) -> int:
         return len(self.parameters)
@@ -221,6 +236,14 @@ class CompiledSpace:
     def dense_dimension(self) -> int:
         return self.n_continuous + self.n_categorical
 
+    @property
+    def is_conditional(self) -> bool:
+        return self._conditional_semantics is not None
+
+    @property
+    def conditional_semantics(self) -> ConditionalSemantics | None:
+        return self._conditional_semantics
+
     def to_spec(self) -> list[dict[str, object]]:
         return [parameter.to_spec() for parameter in self.parameters]
 
@@ -234,6 +257,11 @@ class CompiledSpace:
         if isinstance(value, EncodedBatch):
             self.validate_encoded(value)
             return value
+        if self._conditional_semantics is not None:
+            records = records_from_input(value, self.names)
+            encoded = self._conditional_semantics.encode_records(records)
+            self.validate_encoded(encoded)
+            return encoded
         columns = columns_from_input(value, self.names)
         row_count = len(next(iter(columns.values())))
         for parameter in self._static_parameters:
@@ -266,6 +294,9 @@ class CompiledSpace:
     ) -> CandidateBatch:
         """Decode tensors once and retain those same tensors in CandidateBatch."""
 
+        if self._conditional_semantics is not None:
+            return self._decode_conditional(value, fixed=fixed)
+
         if isinstance(value, CandidateBatch):
             self._validate_fingerprint(value.space_fingerprint)
             if value.decoded_columns is not None and fixed is None:
@@ -290,6 +321,59 @@ class CompiledSpace:
                 columns[name] = (fixed_value,) * len(encoded)
         ordered = {name: columns[name] for name in self.names}
         return CandidateBatch(encoded.continuous, encoded.categorical, self.fingerprint, ordered)
+
+    def _decode_conditional(
+        self,
+        value: EncodedBatch | CandidateBatch,
+        *,
+        fixed: FixedInput | Mapping[str, object] | None,
+    ) -> CandidateBatch:
+        semantics = self._conditional_semantics
+        assert semantics is not None
+        if isinstance(value, CandidateBatch):
+            self._validate_fingerprint(value.space_fingerprint)
+            if value.decoded_columns is not None and value.activity is not None and fixed is None:
+                return value
+            encoded = value.encoded
+        else:
+            encoded = value
+        self.validate_encoded(encoded)
+        fixed_input = self._coerce_fixed(fixed)
+        if fixed_input is not None:
+            encoded = self.apply_fixed(encoded, fixed_input)
+        encoded = semantics._compiled_dtype(encoded)
+        activity = semantics.activity(encoded)
+        projected = semantics._project(encoded, activity.parameter)
+        columns: dict[str, tuple[object, ...]] = {
+            parameter.name: (_static_value(parameter),) * len(encoded)
+            for parameter in self._static_parameters
+        }
+        for index, cont_parameter in enumerate(self._continuous_parameters):
+            columns[cont_parameter.name] = cont_parameter.decode_values(
+                projected.continuous[:, index]
+            )
+        for index, cat_parameter in enumerate(self._categorical_parameters):
+            columns[cat_parameter.name] = cat_parameter.decode_values(
+                projected.categorical[:, index]
+            )
+        if fixed_input is not None:
+            public_positions = {name: index for index, name in enumerate(self.names)}
+            active_cpu = activity.parameter.detach().to(device="cpu")
+            for name, fixed_value in fixed_input.decoded_values:
+                parameter_index = public_positions[name]
+                values = list(columns[name])
+                for row in range(len(encoded)):
+                    if bool(active_cpu[row, parameter_index]):
+                        values[row] = fixed_value
+                columns[name] = tuple(values)
+        ordered = {name: columns[name] for name in self.names}
+        return CandidateBatch(
+            encoded.continuous,
+            encoded.categorical,
+            self.fingerprint,
+            ordered,
+            activity.parameter,
+        )
 
     def validate_encoded(self, encoded: EncodedBatch) -> None:
         self._validate_shape(encoded)
@@ -531,8 +615,38 @@ class CompiledSpace:
         fixed_input = self._coerce_fixed(fixed)
         return self.candidate_from_dense(dense, fixed=fixed_input)
 
+    def context_is_finite(
+        self,
+        fixed: FixedInput | Mapping[str, object] | None = None,
+    ) -> bool:
+        """Return whether the contextual conditional phenotype domain is finite."""
+
+        semantics = self._conditional_semantics
+        if semantics is None:
+            raise ValueError("contextual semantic finiteness requires a conditional space")
+        fixed_input = self._coerce_fixed(fixed)
+        fixed_values = {} if fixed_input is None else dict(fixed_input.decoded_values)
+        return semantics.context_is_finite(fixed_values)
+
+    def iter_contextual_records(
+        self,
+        fixed: FixedInput | Mapping[str, object] | None = None,
+    ) -> Iterator[dict[str, object]]:
+        """Yield every phenotype when the contextual conditional domain is finite."""
+
+        semantics = self._conditional_semantics
+        if semantics is None:
+            raise ValueError("contextual semantic enumeration requires a conditional space")
+        fixed_input = self._coerce_fixed(fixed)
+        fixed_values = {} if fixed_input is None else dict(fixed_input.decoded_values)
+        yield from semantics.iter_contextual_records(fixed_values)
+
     def canonical_key_tensor(self, value: EncodedBatch | CandidateBatch) -> torch.Tensor:
-        """Return exact int64 key components in public schema order on CPU."""
+        """Return exact int64 semantic-key components on CPU."""
+
+        if self._conditional_semantics is not None:
+            encoded = self.encode(value)
+            return self._conditional_semantics.key_tensor(encoded).detach().to(device="cpu")
 
         if isinstance(value, CandidateBatch):
             self._validate_fingerprint(value.space_fingerprint)

@@ -6,11 +6,10 @@ The study asks one question: at the same CARP-S evaluation budgets, does LeanHEB
 upstream HEBO's optimization quality while spending less time in `ask` and `tell`?
 
 It uses the 13 flat tasks in [`tasks.json`](carps/tasks.json): eight BBOB tasks and five
-YAHPO surrogate HPO tasks from the CARP-S 1.1.0 black-box test set. Conditional tasks and the
-HPOBench task are excluded because LeanHEBO does not support conditional spaces and HPOBench
-requires a separate installation path. Each optimizer uses its defaults, suggests one point at
-a time on one CPU thread, and runs 20 seeds with CARP-S's task budgets: 34,900 evaluations per
-optimizer.
+YAHPO surrogate HPO tasks from the CARP-S 1.1.0 black-box test set. Conditional tasks are outside
+this fixed study, and the HPOBench task requires a separate installation path. Each optimizer uses
+its defaults, suggests one point at a time on one CPU thread, and runs 20 seeds with CARP-S's task
+budgets: 34,900 evaluations per optimizer.
 
 Quality is CARP-S's pooled per-task min-max normalized incumbent cost; lower is better. The
 figure averages the fixed task set within each seed and shows a 95% interval over the 20 seeds.
