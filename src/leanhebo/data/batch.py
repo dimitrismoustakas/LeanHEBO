@@ -247,29 +247,3 @@ class CandidateBatch:
         for column, name in enumerate(names):
             result[:, column] = self.decoded_columns[name]
         return result
-
-    def to_pandas(self) -> object:
-        """Return a Pandas DataFrame, importing the optional dependency lazily."""
-
-        if self.decoded_columns is None:
-            raise ValueError("this CandidateBatch has no decoded column metadata")
-        try:
-            import pandas as pd  # type: ignore[import-untyped]
-        except ImportError as error:  # pragma: no cover - depends on optional environment
-            raise ImportError(
-                "Pandas support is optional; install LeanHEBO with the 'pandas' extra"
-            ) from error
-        return pd.DataFrame(dict(self.decoded_columns))
-
-    def to_polars(self) -> object:
-        """Return a Polars DataFrame, importing the optional dependency lazily."""
-
-        if self.decoded_columns is None:
-            raise ValueError("this CandidateBatch has no decoded column metadata")
-        try:
-            import polars as pl
-        except ImportError as error:  # pragma: no cover - depends on optional environment
-            raise ImportError(
-                "Polars support is optional; install LeanHEBO with the 'polars' extra"
-            ) from error
-        return pl.DataFrame(dict(self.decoded_columns))

@@ -19,12 +19,6 @@ python -m pip install leanhebo
 uv add leanhebo
 ```
 
-Pandas and Polars support is optional:
-
-```console
-python -m pip install "leanhebo[pandas,polars]"
-```
-
 CPU is the release-tested path. CUDA can be selected with `RuntimeConfig(device="cuda")`, but it
 is experimental and is not tested end to end in CI. It never silently falls back from the
 configured device.
@@ -72,9 +66,9 @@ print(optimizer.best_x.to_records()[0], optimizer.best_y)
 
 The reduced fitting and search settings keep this example quick; the defaults do more work.
 
-Pass the returned `CandidateBatch` directly to `observe` to avoid re-encoding. Records, NumPy
-arrays, Pandas DataFrames, and Polars DataFrames are also accepted at the boundary. Fix contextual
-values when suggesting with:
+Pass the returned `CandidateBatch` directly to `observe` to avoid re-encoding. Records, column
+mappings, and NumPy arrays are also accepted at the boundary. Fix contextual values when suggesting
+with:
 
 ```python
 candidates = optimizer.suggest(8, fix_input={"use_bias": True})

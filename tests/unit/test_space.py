@@ -140,15 +140,23 @@ def test_encode_decode_round_trip_and_tensor_identity() -> None:
     assert candidates.to_numpy().shape == (2, len(compiled))
 
 
-def test_numpy_pandas_and_polars_adapters() -> None:
+def test_numpy_and_column_mapping_adapters() -> None:
     compiled = Space(Float("x", -1.0, 1.0), Integer("n", 1, 3), Bool("flag")).compile()
     array = np.asarray([[0.25, 2, True], [-0.5, 1, False]], dtype=object)
     candidates = compiled.decode(compiled.encode(array))
+    mapping = {"x": [0.25, -0.5], "n": [2, 1], "flag": [True, False]}
+    tensor_mapping = {
+        "x": torch.tensor([0.25, -0.5]),
+        "n": torch.tensor([2, 1]),
+        "flag": torch.tensor([True, False]),
+    }
 
-    pandas_frame = candidates.to_pandas()
-    polars_frame = candidates.to_polars()
-    assert compiled.decode(compiled.encode(pandas_frame)).to_records() == candidates.to_records()
-    assert compiled.decode(compiled.encode(polars_frame)).to_records() == candidates.to_records()
+    assert candidates.to_records() == [
+        {"x": 0.25, "n": 2, "flag": True},
+        {"x": -0.5, "n": 1, "flag": False},
+    ]
+    assert compiled.decode(compiled.encode(mapping)).to_records() == candidates.to_records()
+    assert compiled.decode(compiled.encode(tensor_mapping)).to_records() == candidates.to_records()
 
 
 def test_dense_bridge_repairs_every_variable_kind() -> None:

@@ -4,39 +4,33 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, TypeAlias, cast
+from collections.abc import Mapping, Sequence
+from typing import TypeAlias, cast
 
 import numpy as np
+import torch
 
 Columns: TypeAlias = dict[str, list[object]]
 Records: TypeAlias = list[dict[str, object]]
-_UNSUPPORTED_INPUT = (
-    "unsupported input type; expected records, a column mapping, NumPy, Pandas, or Polars"
-)
+_UNSUPPORTED_INPUT = "unsupported input type; expected records, a column mapping, or NumPy"
 
 
 def _is_column_like(value: object) -> bool:
     if isinstance(value, (str, bytes, bytearray)):
         return False
-    if isinstance(value, np.ndarray):
+    if isinstance(value, (np.ndarray, torch.Tensor)):
         return value.ndim > 0
-    return isinstance(value, Sequence) or hasattr(value, "to_list") or hasattr(value, "tolist")
+    return isinstance(value, Sequence)
 
 
 def _column_to_list(value: object) -> list[object]:
     if isinstance(value, np.ndarray):
         return value.reshape(-1).tolist()
-    if hasattr(value, "to_list"):
-        result = cast(Any, value).to_list()
-        return list(result) if isinstance(result, Iterable) else [result]
-    elif hasattr(value, "tolist"):
-        result = cast(Any, value).tolist()
-        return list(result) if isinstance(result, list) else [result]
-    elif isinstance(value, Iterable):
+    if isinstance(value, torch.Tensor):
+        return value.reshape(-1).tolist()
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return list(value)
-    else:
-        raise TypeError("column values must be iterable")
+    raise TypeError("column values must be sequences or NumPy arrays")
 
 
 def _validate_lengths(columns: Mapping[str, Sequence[object]]) -> None:
@@ -91,19 +85,6 @@ def columns_from_input(value: object, names: Sequence[str]) -> Columns:
         columns = {name: [row[name] for row in records] for name in expected}
     elif isinstance(value, np.ndarray):
         columns = _array_columns(value, expected)
-    elif type(value).__module__.split(".", 1)[0] in {"pandas", "polars"}:
-        tabular = cast(Any, value)
-        missing = [name for name in expected if name not in tabular.columns]
-        if missing:
-            raise ValueError(f"tabular input is missing columns: {missing}")
-        columns = {
-            name: (
-                tabular.get_column(name).to_list()
-                if hasattr(tabular, "get_column")
-                else tabular[name].tolist()
-            )
-            for name in expected
-        }
     else:
         raise TypeError(_UNSUPPORTED_INPUT)
     _validate_lengths(columns)
@@ -147,10 +128,6 @@ def records_from_input(value: object, names: Sequence[str]) -> Records:
         unknown = sorted(set(value.dtype.names).difference(expected_set))
         if unknown:
             raise ValueError(f"NumPy structured array contains unknown columns: {unknown}")
-    if type(value).__module__.split(".", 1)[0] in {"pandas", "polars"}:
-        unknown = sorted(set(cast(Any, value).columns).difference(expected_set))
-        if unknown:
-            raise ValueError(f"tabular input contains unknown columns: {unknown}")
     columns = columns_from_input(value, expected)
     if not columns:
         return []

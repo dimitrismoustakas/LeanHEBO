@@ -28,16 +28,11 @@ Homepage = "https://github.com/dimitrismoustakas/LeanHEBO"
 Repository = "https://github.com/dimitrismoustakas/LeanHEBO"
 Issues = "https://github.com/dimitrismoustakas/LeanHEBO/issues"
 
-[project.optional-dependencies]
-pandas = ["pandas>=2.2"]
-polars = ["polars>=1.0"]
-
 [dependency-groups]
 dev = [
     "hypothesis>=6.100",
     "mypy>=1.11",
     "pandas>=2.2",
-    "polars>=1.0",
     "pymoo>=0.6",
     "pytest>=8",
     "ruff>=0.6",
