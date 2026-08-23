@@ -217,7 +217,11 @@ class ExactGPSurrogate:
                 ),
                 retain_optimizer_state=(
                     previous_optimizer_state
-                    if self.config.reuse_optimizer_state and not first_fit
+                    if (
+                        self.config.reuse_optimizer_state
+                        and not first_fit
+                        and (not full_refit or not self.config.reset_optimizer_on_full_refit)
+                    )
                     else None
                 ),
                 initialize_kernel=first_fit or not self.config.reuse_parameters,
@@ -406,7 +410,11 @@ class ExactGPSurrogate:
 
     def _create_optimizer(self) -> torch.optim.Adam:
         assert self.model is not None
-        return torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate)
+        return torch.optim.Adam(
+            self.model.parameters(),
+            lr=self.config.learning_rate,
+            betas=(0.9, self.config.adam_beta2),
+        )
 
     def _settings(self) -> ExitStack:
         stack = ExitStack()

@@ -58,10 +58,14 @@ class GPConfig:
     kernel_initialization_samples: int = 1000
     lengthscale_lower_bound: float = 0.02
     jitter: float = 1e-8
+    adam_beta2: float = 0.99
+    reset_optimizer_on_full_refit: bool = True
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
             raise ValueError("learning_rate must be positive and finite")
+        if not math.isfinite(self.adam_beta2) or not 0 <= self.adam_beta2 < 1:
+            raise ValueError("adam_beta2 must be finite and in [0, 1)")
         if self.initial_steps < 0 or self.update_steps < 0:
             raise ValueError("GP step counts cannot be negative")
         if self.full_refit_interval is not None and self.full_refit_interval < 1:

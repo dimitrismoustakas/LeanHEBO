@@ -571,6 +571,48 @@ def test_scheduled_full_refit_cadence_resets_after_each_refit() -> None:
     assert gp.updates_since_full_refit == 1
 
 
+@pytest.mark.parametrize(
+    ("reset_optimizer_on_full_refit", "expected_steps"),
+    [(True, {1}), (False, {3})],
+)
+def test_scheduled_full_refit_applies_adam_state_policy(
+    reset_optimizer_on_full_refit: bool,
+    expected_steps: set[int],
+) -> None:
+    gp = ExactGPSurrogate(
+        num_continuous=1,
+        category_sizes=(),
+        config=GPConfig(
+            initial_steps=1,
+            update_steps=1,
+            full_refit_interval=2,
+            full_refit_growth_factor=None,
+            reset_optimizer_on_full_refit=reset_optimizer_on_full_refit,
+            kernel_initialization_samples=16,
+        ),
+        runtime=RuntimeConfig(seed=5),
+        generator=make_generator("cpu", 5),
+    )
+    continuous = torch.linspace(0, 1, 5).reshape(-1, 1)
+    categorical = torch.empty((5, 0), dtype=torch.long)
+    targets = torch.sin(continuous[:, 0])
+
+    gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
+    assert gp.optimizer is not None
+    optimizer = gp.optimizer
+    gp.fit(continuous[:4], categorical[:4], targets[:4], transform_version=2)
+
+    assert gp.optimizer is optimizer
+    assert gp.optimizer.param_groups[0]["betas"] == (0.9, 0.99)
+    assert {int(state["step"].item()) for state in gp.optimizer.state.values()} == {2}
+
+    report = gp.fit(continuous, categorical, targets, transform_version=3)
+
+    assert report.kind == "full_refit"
+    assert gp.optimizer is not None and gp.optimizer is not optimizer
+    assert {int(state["step"].item()) for state in gp.optimizer.state.values()} == expected_steps
+
+
 def test_disabled_optimizer_reuse_resets_state_on_warm_update() -> None:
     gp = ExactGPSurrogate(
         num_continuous=1,
