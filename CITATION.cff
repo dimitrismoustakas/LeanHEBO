@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use LeanHEBO, cite both LeanHEBO and the original HEBO work."
 title: "LeanHEBO"
 type: software
-version: 0.3.0
-date-released: 2026-08-21
+version: 0.3.1
+date-released: 2026-08-23
 license: MIT
 authors:
   - name: "LeanHEBO contributors"

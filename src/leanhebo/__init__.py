@@ -13,7 +13,7 @@ from leanhebo.config import (
 )
 from leanhebo.optimizer import LeanHEBO
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "AcquisitionConfig",
