@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gpytorch  # type: ignore[import-untyped]
 import pytest
 import torch
 
@@ -50,6 +51,19 @@ def _fantasy_surrogate(*, categories: tuple[int, ...] = ()) -> ExactGPSurrogate:
     )
 
 
+def _current_training_loss(gp: ExactGPSurrogate) -> float:
+    assert gp.model is not None and gp.likelihood is not None
+    gp.model.train()
+    gp.likelihood.train()
+    try:
+        mll = gpytorch.mlls.ExactMarginalLogLikelihood(gp.likelihood, gp.model)
+        with torch.no_grad():
+            return float(gp._training_loss(mll).cpu())
+    finally:
+        gp.model.eval()
+        gp.likelihood.eval()
+
+
 def test_adam_fits_and_predicts() -> None:
     gp = ExactGPSurrogate(
         num_continuous=1,
@@ -75,6 +89,7 @@ def test_adam_fits_and_predicts() -> None:
 
     assert report.kind == "initial"
     assert report.completed_steps == 1
+    assert report.final_loss == pytest.approx(_current_training_loss(gp))
     assert isinstance(gp.optimizer, torch.optim.Adam)
     assert mean.shape == variance.shape == (2,)
     assert torch.isfinite(mean).all()
@@ -89,17 +104,66 @@ def test_gp_fit_failure_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     targets = continuous[:, 0].square()
     calls = 0
 
-    def fail(_: object) -> float:
+    def fail(_: object) -> torch.Tensor:
         nonlocal calls
         calls += 1
         raise RuntimeError("cholesky failed")
 
-    monkeypatch.setattr(gp, "_optimization_step", fail)
+    monkeypatch.setattr(gp, "_training_loss", fail)
 
     with pytest.raises(NumericalError, match="cholesky failed"):
         gp.fit(continuous, categorical, targets, transform_version=1)
 
     assert calls == 1
+
+
+def test_nonfinite_loss_is_rejected_before_optimizer_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gp = _surrogate()
+    continuous = torch.tensor([[0.0], [0.5], [1.0]])
+    categorical = torch.empty((3, 0), dtype=torch.long)
+    targets = continuous[:, 0].square()
+
+    def nonfinite_loss(_: object) -> torch.Tensor:
+        return torch.tensor(float("nan"), requires_grad=True)
+
+    monkeypatch.setattr(gp, "_training_loss", nonfinite_loss)
+
+    with pytest.raises(NumericalError, match="non-finite loss"):
+        gp.fit(continuous, categorical, targets, transform_version=1)
+
+    assert gp.optimizer is not None
+    assert not gp.optimizer.state
+
+
+def test_early_stopping_does_not_apply_an_unevaluated_step() -> None:
+    gp = ExactGPSurrogate(
+        num_continuous=1,
+        category_sizes=(),
+        config=GPConfig(
+            initial_steps=5,
+            update_steps=1,
+            full_refit_interval=None,
+            full_refit_growth_factor=None,
+            early_stopping=True,
+            patience=1,
+            relative_tolerance=1e30,
+        ),
+        runtime=RuntimeConfig(seed=4),
+        generator=make_generator("cpu", 4),
+    )
+    continuous = torch.tensor([[0.0], [0.5], [1.0]])
+    categorical = torch.empty((3, 0), dtype=torch.long)
+    targets = continuous[:, 0].square()
+
+    report = gp.fit(continuous, categorical, targets, transform_version=1)
+
+    assert report.early_stopped
+    assert report.completed_steps == 1
+    assert report.final_loss == pytest.approx(_current_training_loss(gp))
+    assert gp.optimizer is not None
+    assert {int(state["step"].item()) for state in gp.optimizer.state.values()} == {1}
 
 
 def test_persistent_update_reuses_model_and_changes_train_data() -> None:

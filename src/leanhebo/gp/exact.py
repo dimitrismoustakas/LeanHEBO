@@ -447,20 +447,33 @@ class ExactGPSurrogate:
 
         try:
             for _ in range(requested_steps):
-                final_loss = self._optimization_step(mll)
-                completed += 1
-                if not math.isfinite(final_loss):
+                self.optimizer.zero_grad(set_to_none=True)
+                loss = self._training_loss(mll)
+                current_loss = float(loss.detach().cpu())
+                final_loss = current_loss
+                if not math.isfinite(current_loss):
                     raise NumericalError("exact-GP fitting produced a non-finite loss")
                 if self.config.early_stopping and previous_loss is not None:
                     denominator = max(abs(previous_loss), torch.finfo(self.dtype).eps)
-                    relative_change = abs(previous_loss - final_loss) / denominator
+                    relative_change = abs(previous_loss - current_loss) / denominator
                     stable_steps = (
                         stable_steps + 1 if relative_change <= self.config.relative_tolerance else 0
                     )
                     if stable_steps >= self.config.patience:
                         early_stopped = True
                         break
-                previous_loss = final_loss
+                loss.backward()  # type: ignore[no-untyped-call]
+                final_loss = None
+                self.optimizer.step()
+                completed += 1
+                previous_loss = current_loss
+            if completed and not early_stopped:
+                final_loss = None
+                with torch.no_grad():
+                    loss = self._training_loss(mll)
+                final_loss = float(loss.detach().cpu())
+                if not math.isfinite(final_loss):
+                    raise NumericalError("exact-GP fitting produced a non-finite loss")
         except (NumericalError, RuntimeError) as exc:
             failure = f"{type(exc).__name__}: {exc}"
             self.model.eval()
@@ -492,26 +505,16 @@ class ExactGPSurrogate:
             failure=failure,
         )
 
-    def _optimization_step(self, mll: gpytorch.mlls.ExactMarginalLogLikelihood) -> float:
+    def _training_loss(self, mll: gpytorch.mlls.ExactMarginalLogLikelihood) -> torch.Tensor:
         assert self.model is not None
-        assert self.optimizer is not None
         assert self.train_continuous is not None
         assert self.train_categorical is not None
         assert self.train_targets is not None
 
-        model = self.model
-        optimizer = self.optimizer
-        train_continuous = self.train_continuous
-        train_categorical = self.train_categorical
-        train_targets = self.train_targets
-
-        optimizer.zero_grad(set_to_none=True)
         with self._settings():
-            distribution = model(train_continuous, train_categorical)
-            loss: torch.Tensor = -mll(distribution, train_targets)
-        loss.backward()  # type: ignore[no-untyped-call]
-        optimizer.step()
-        return float(loss.detach().cpu())
+            distribution = self.model(self.train_continuous, self.train_categorical)
+            loss: torch.Tensor = -mll(distribution, self.train_targets)
+        return loss
 
     @torch.no_grad()
     def predict(
