@@ -25,16 +25,18 @@ from leanhebo.space.conditions import (
     LessThan,
     NotEqual,
 )
-from leanhebo.space.parameters import Bool, Categorical, Float, Integer, ParameterLike
+from leanhebo.space.parameters import (
+    Bool,
+    Categorical,
+    Float,
+    Integer,
+    ParameterLike,
+    _decode_power_integers,
+    _is_static,
+)
 
 _Comparison: TypeAlias = Literal["eq", "not_equal", "in", "lt", "le", "gt", "ge"]
 _Storage: TypeAlias = Literal["continuous", "log_integer", "categorical", "static"]
-
-
-def _is_static(parameter: ParameterLike) -> bool:
-    return (isinstance(parameter, Integer) and parameter.low == parameter.high) or (
-        isinstance(parameter, Categorical) and len(parameter.categories) == 1
-    )
 
 
 def _representative(parameter: ParameterLike) -> object:
@@ -92,22 +94,6 @@ def _numeric_threshold(parameter: Float | Integer, value: float | int) -> float:
     return threshold
 
 
-def _decode_log_integer(
-    coordinate: torch.Tensor,
-    *,
-    semantic_low: int,
-    semantic_high: int,
-    log_low: float,
-    log_span: float,
-) -> torch.Tensor:
-    return (
-        torch.exp(log_low + coordinate.to(torch.float64).clamp(0.0, 1.0) * log_span)
-        .round()
-        .clamp(semantic_low, semantic_high)
-        .to(torch.int64)
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class ActivityBatch:
     """Parameter- and group-level activity for one encoded batch."""
@@ -126,8 +112,6 @@ class _CompiledAtom:
     static_result: bool = False
     semantic_low: int = 0
     semantic_high: int = 0
-    log_low: float = 0.0
-    log_span: float = 0.0
 
     def evaluate(
         self,
@@ -146,12 +130,10 @@ class _CompiledAtom:
         if self.storage == "log_integer":
             cached = log_integer_values.get(self.parent_index)
             if cached is None:
-                cached = _decode_log_integer(
+                cached = _decode_power_integers(
                     column,
-                    semantic_low=self.semantic_low,
-                    semantic_high=self.semantic_high,
-                    log_low=self.log_low,
-                    log_span=self.log_span,
+                    low=self.semantic_low,
+                    high=self.semantic_high,
                 )
                 log_integer_values[self.parent_index] = cached
             column = cached
@@ -379,12 +361,6 @@ class ConditionalSemantics:
             )
             semantic_low = 0 if log_parameter is None else log_parameter.low
             semantic_high = 0 if log_parameter is None else log_parameter.high
-            log_low = 0.0 if log_parameter is None else math.log(log_parameter.low)
-            log_span = (
-                0.0
-                if log_parameter is None
-                else math.log(log_parameter.high) - math.log(log_parameter.low)
-            )
 
             if isinstance(condition, (Eq, NotEqual, In)):
                 if not isinstance(parameter, (Integer, Categorical, Bool)):
@@ -433,8 +409,6 @@ class ConditionalSemantics:
                     static_result,
                     semantic_low=semantic_low,
                     semantic_high=semantic_high,
-                    log_low=log_low,
-                    log_span=log_span,
                 )
 
             if not isinstance(parameter, (Float, Integer)):
@@ -478,8 +452,6 @@ class ConditionalSemantics:
                 static_result,
                 semantic_low=semantic_low,
                 semantic_high=semantic_high,
-                log_low=log_low,
-                log_span=log_span,
             )
 
         program_by_condition: dict[Condition, _CompiledNode] = {}
@@ -688,13 +660,10 @@ class ConditionalSemantics:
                 raise TypeError("compiled log-integer key metadata is inconsistent")
             semantic = log_integer_values.get(parameter_index)
             if semantic is None:
-                log_low = math.log(parameter.low)
-                semantic = _decode_log_integer(
+                semantic = _decode_power_integers(
                     encoded.continuous[:, column],
-                    semantic_low=parameter.low,
-                    semantic_high=parameter.high,
-                    log_low=log_low,
-                    log_span=math.log(parameter.high) - log_low,
+                    low=parameter.low,
+                    high=parameter.high,
                 )
                 log_integer_values[parameter_index] = semantic
             value_components.append(semantic[:, None])

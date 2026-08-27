@@ -64,8 +64,8 @@ def test_mixed_sequential_loop_uses_direct_candidate_observation_and_warm_update
     assert len(following) == 2
     assert optimizer.surrogate is not None
     assert id(optimizer.surrogate.model) == model_identity
-    assert optimizer.surrogate.update_count == 1
-    assert optimizer.best_y == float(optimizer.store.y.min())
+    assert optimizer.diagnostics.counters["gp.update"] == 1
+    assert optimizer.best_y == float(optimizer.store.materialize().y.min())
     assert float(_objective(optimizer.best_x.to_records())[0]) == pytest.approx(optimizer.best_y)
     assert optimizer.diagnostics.counters["posterior.calls"] > 0
 

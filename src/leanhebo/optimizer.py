@@ -261,7 +261,6 @@ class LeanHEBO:
             raise RuntimeError("at least two finite observations are required for model fitting")
         with self.diagnostics.phase("suggest.fit_output_transform"):
             transformed = self.output_transform.fit_transform(observations.y)
-            self.store.set_transformed_y(transformed)
         if self._surrogate is None:
             with self.diagnostics.phase("suggest.gp_construct"):
                 self._surrogate = self._make_surrogate()
@@ -756,8 +755,6 @@ class LeanHEBO:
         if surrogate_state is not None:
             self._surrogate = self._make_surrogate()
             self._surrogate.load_state_dict(surrogate_state)
-            if self.output_transform.fitted and len(self.store):
-                self.store.set_transformed_y(self.output_transform.transform(self.store.y))
         else:
             self._surrogate = None
         self.random.load_state_dict(dict(state["random"]))

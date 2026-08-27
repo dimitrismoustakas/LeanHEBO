@@ -96,27 +96,6 @@ def build_base_kernel(
     return components[0] if len(components) == 1 else gpytorch.kernels.ProductKernel(*components)
 
 
-def initialize_numeric_lengthscales(
-    kernel: gpytorch.kernels.ScaleKernel,
-    continuous: torch.Tensor,
-    *,
-    sample_limit: int,
-    lower_bound: float,
-    generator: torch.Generator,
-) -> None:
-    """Set ARD lengthscales from capped exact per-dimension pairwise distances."""
-
-    if continuous.shape[1] == 0 or not isinstance(kernel.base_kernel, gpytorch.kernels.Kernel):
-        return
-    initialize_base_numeric_lengthscales(
-        kernel.base_kernel,
-        continuous,
-        sample_limit=sample_limit,
-        lower_bound=lower_bound,
-        generator=generator,
-    )
-
-
 def initialize_base_numeric_lengthscales(
     base: gpytorch.kernels.Kernel,
     continuous: torch.Tensor,

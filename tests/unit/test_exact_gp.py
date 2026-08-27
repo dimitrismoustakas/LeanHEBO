@@ -12,7 +12,7 @@ from leanhebo.gp import ExactGPSurrogate
 from leanhebo.gp.kernel import (
     MixedFeatureExtractor,
     build_kernel,
-    initialize_numeric_lengthscales,
+    initialize_base_numeric_lengthscales,
 )
 from leanhebo.runtime.rng import make_generator
 
@@ -168,7 +168,6 @@ def test_persistent_update_reuses_model_and_changes_train_data() -> None:
     assert initial.kind == "initial"
     assert update.kind == "update"
     assert id(gp.model) == model_id
-    assert gp.update_count == 1
     assert gp.model is not None
     assert gp.model.train_targets.shape == (7,)
 
@@ -297,8 +296,8 @@ def test_numeric_lengthscale_uses_median_of_all_pairwise_distances() -> None:
     kernel = build_kernel(num_continuous=1, feature_extractor=extractor, ard=True)
     values = torch.tensor([[0.0], [1.0], [2.0], [100.0]])
 
-    initialize_numeric_lengthscales(
-        kernel,
+    initialize_base_numeric_lengthscales(
+        kernel.base_kernel,
         values,
         sample_limit=4,
         lower_bound=0.02,
@@ -342,7 +341,6 @@ def test_scheduled_full_refit_cadence_resets_after_each_refit() -> None:
         "full_refit",
         "update",
     ]
-    assert gp.full_refit_count == 2
     assert gp.updates_since_full_refit == 1
 
 

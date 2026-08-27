@@ -49,6 +49,19 @@ def _as_integer(value: object, *, parameter: str) -> int:
     return int(numeric)
 
 
+def _decode_power_integers(coordinates: torch.Tensor, *, low: int, high: int) -> torch.Tensor:
+    """Decode unit-interval power-mode coordinates to semantic int64 values."""
+
+    log_low = math.log(low)
+    log_span = math.log(high) - log_low
+    return (
+        torch.exp(log_low + coordinates.to(torch.float64).clamp(0.0, 1.0) * log_span)
+        .round()
+        .clamp(low, high)
+        .to(torch.int64)
+    )
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class Parameter(ABC):
     """Base class shared by all public parameter types."""
@@ -315,10 +328,7 @@ class Integer(Parameter):
                 torch.tensor(self.base, dtype=torch.float64), coordinates.round()
             ).round()
         elif self.log:
-            coordinates = coordinates.clamp(0.0, 1.0)
-            log_low = math.log(self.low)
-            log_span = math.log(self.high) - log_low
-            decoded = torch.exp(log_low + coordinates * log_span).round()
+            decoded = _decode_power_integers(coordinates, low=self.low, high=self.high)
         elif self.step != 1:
             decoded = coordinates.round() * self.step + self.low
         else:
@@ -454,6 +464,14 @@ class Bool(Parameter):
 
 
 ParameterLike: TypeAlias = Float | Integer | Categorical | Bool
+
+
+def _is_static(parameter: ParameterLike) -> bool:
+    """Whether a parameter's domain contains exactly one value."""
+
+    return (isinstance(parameter, Integer) and parameter.low == parameter.high) or (
+        isinstance(parameter, Categorical) and len(parameter.categories) == 1
+    )
 
 
 def parameter_from_spec(spec: dict[str, Any]) -> ParameterLike:

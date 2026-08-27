@@ -34,7 +34,7 @@ def test_nonfinite_policy_and_output_shape_validation() -> None:
     dropping = ObservationStore(compiled, nonfinite="drop")
     assert dropping.append(candidates, [1.0, float("nan"), 3.0]) == 2
     assert dropping.discarded_count == 1
-    assert torch.equal(dropping.y, torch.tensor([1.0, 3.0]))
+    assert torch.equal(dropping.materialize().y, torch.tensor([1.0, 3.0]))
 
     strict = ObservationStore(compiled, nonfinite="raise")
     with pytest.raises(ValueError, match="non-finite"):
@@ -68,14 +68,3 @@ def test_float_canonical_keys_normalize_signed_zero() -> None:
     assert compiled.canonical_keys(negative_zero) == compiled.canonical_keys(positive_zero)
     store.append(negative_zero, [1.0])
     assert store.unique_mask(positive_zero).tolist() == [False]
-
-
-def test_transformed_values_are_invalidated_when_observations_change() -> None:
-    compiled = Space(Float("x", 0.0, 1.0)).compile(dtype=torch.float64)
-    store = ObservationStore(compiled)
-    store.append(compiled.sample(2, seed=7), [1.0, 2.0])
-    store.set_transformed_y([-1.0, 1.0])
-
-    assert torch.equal(store.transformed_y, torch.tensor([-1.0, 1.0], dtype=torch.float64))
-    store.append(compiled.sample(1, seed=8), [3.0])
-    assert store.transformed_y is None

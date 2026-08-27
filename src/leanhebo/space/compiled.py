@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from numbers import Real
@@ -19,15 +18,17 @@ from leanhebo.data.adapters import columns_from_input, records_from_input
 from leanhebo.data.batch import CandidateBatch, EncodedBatch
 from leanhebo.errors import SpaceMismatchError
 from leanhebo.space.conditional import ConditionalSemantics
-from leanhebo.space.parameters import Bool, Categorical, Float, Integer, ParameterLike
+from leanhebo.space.parameters import (
+    Bool,
+    Categorical,
+    Float,
+    Integer,
+    ParameterLike,
+    _decode_power_integers,
+    _is_static,
+)
 
 ExternalBatch: TypeAlias = object
-
-
-def _is_static(parameter: ParameterLike) -> bool:
-    return (isinstance(parameter, Integer) and parameter.low == parameter.high) or (
-        isinstance(parameter, Categorical) and len(parameter.categories) == 1
-    )
 
 
 def _static_value(parameter: ParameterLike) -> object:
@@ -474,12 +475,10 @@ class CompiledSpace:
                     and cont_parameter.log
                     and not cont_parameter.exponent
                 ):
-                    log_low = math.log(cont_parameter.low)
-                    log_span = math.log(cont_parameter.high) - log_low
-                    semantic = (
-                        torch.exp(log_low + column.to(torch.float64) * log_span)
-                        .round()
-                        .clamp(cont_parameter.low, cont_parameter.high)
+                    semantic = _decode_power_integers(
+                        column,
+                        low=cont_parameter.low,
+                        high=cont_parameter.high,
                     )
                     column = cont_parameter._encode_log_values(semantic, dtype=column.dtype).clamp(
                         lower, upper
@@ -684,8 +683,11 @@ class CompiledSpace:
                 )
                 columns[cont_parameter.name] = bits
             elif cont_parameter.log and not cont_parameter.exponent:
-                decoded = cont_parameter.decode_values(column)
-                columns[cont_parameter.name] = torch.tensor(decoded, dtype=torch.int64)
+                columns[cont_parameter.name] = _decode_power_integers(
+                    column,
+                    low=cont_parameter.low,
+                    high=cont_parameter.high,
+                )
             else:
                 columns[cont_parameter.name] = column.round().to(torch.int64)
         for index, cat_parameter in enumerate(self._categorical_parameters):

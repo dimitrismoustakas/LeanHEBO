@@ -25,7 +25,6 @@ class ObservationBatch:
 
     encoded: EncodedBatch
     y: torch.Tensor
-    transformed_y: torch.Tensor | None
 
     def __len__(self) -> int:
         return len(self.encoded)
@@ -72,7 +71,6 @@ class ObservationStore:
         self._y_chunks: list[torch.Tensor] = []
         self._keys = CanonicalKeySet(space)
         self._cache: ObservationBatch | None = None
-        self._transformed_y: torch.Tensor | None = None
         self.observation_version = 0
         self.discarded_count = 0
 
@@ -114,7 +112,6 @@ class ObservationStore:
         self._y_chunks.append(outcomes.detach().clone())
         self._keys.add(encoded)
         self.observation_version += 1
-        self._transformed_y = None
         self._cache = None
         return len(encoded)
 
@@ -174,55 +171,14 @@ class ObservationStore:
                 device=self.device,
             )
             outcomes = torch.empty((0,), dtype=self.dtype, device=self.device)
-        self._cache = ObservationBatch(
-            EncodedBatch(continuous, categorical),
-            outcomes,
-            self._transformed_y,
-        )
+        self._cache = ObservationBatch(EncodedBatch(continuous, categorical), outcomes)
         return self._cache
 
     def materialize(self) -> ObservationBatch:
         """Return a detached snapshot of the cached, concatenated observation state."""
 
         view = self._materialize_view()
-        transformed = None if view.transformed_y is None else view.transformed_y.clone()
-        return ObservationBatch(
-            view.encoded.clone(),
-            view.y.clone(),
-            transformed,
-        )
-
-    @property
-    def encoded(self) -> EncodedBatch:
-        return self.materialize().encoded
-
-    @property
-    def continuous(self) -> torch.Tensor:
-        return self.materialize().continuous
-
-    @property
-    def categorical(self) -> torch.Tensor:
-        return self.materialize().categorical
-
-    @property
-    def y(self) -> torch.Tensor:
-        return self.materialize().y
-
-    @property
-    def transformed_y(self) -> torch.Tensor | None:
-        return self.materialize().transformed_y
-
-    def set_transformed_y(
-        self,
-        values: torch.Tensor | np.ndarray | Sequence[float],
-    ) -> None:
-        """Install transformed outcomes for the current observations."""
-
-        transformed = self._coerce_outcomes(values, expected_rows=len(self))
-        if not torch.isfinite(transformed).all():
-            raise ValueError("transformed objective values must be finite")
-        self._transformed_y = transformed.detach().clone()
-        self._cache = None
+        return ObservationBatch(view.encoded.clone(), view.y.clone())
 
     def clear(self) -> None:
         """Clear all data and reservations while retaining the compiled schema."""
@@ -231,6 +187,5 @@ class ObservationStore:
         self._y_chunks.clear()
         self._keys.clear()
         self._cache = None
-        self._transformed_y = None
         self.observation_version += 1
         self.discarded_count = 0

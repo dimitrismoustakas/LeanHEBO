@@ -261,11 +261,10 @@ def test_integrated_mace_evaluates_each_candidate_chunk_once(
         continuous: torch.Tensor,
         categorical: torch.Tensor,
     ) -> PosteriorStats:
-        provider = evaluator.provider
-        before = provider.posterior_calls  # type: ignore[attr-defined]
+        counters = evaluator.provider.diagnostics.counters  # type: ignore[attr-defined]
+        before = counters["posterior.calls"]
         result = original_evaluate(evaluator, continuous, categorical)
-        after = provider.posterior_calls  # type: ignore[attr-defined]
-        events.append((len(continuous), after - before))
+        events.append((len(continuous), counters["posterior.calls"] - before))
         return result
 
     monkeypatch.setattr(PosteriorEvaluator, "evaluate", recording_evaluate)
@@ -278,7 +277,6 @@ def test_integrated_mace_evaluates_each_candidate_chunk_once(
     assert [count for count, _ in search_events] == [4, 4]
     for candidate_count, posterior_calls in events:
         assert posterior_calls == math.ceil(candidate_count / 3)
-    assert optimizer.surrogate.posterior_calls == sum(calls for _, calls in events)
     assert optimizer.diagnostics.counters["posterior.calls"] == sum(calls for _, calls in events)
 
 
@@ -306,7 +304,7 @@ def test_posterior_numerical_failure_is_not_retried(
 
     assert calls == 1
     assert optimizer.surrogate is not None
-    assert optimizer.surrogate.full_refit_count == 1
+    assert optimizer.diagnostics.counters["gp.initial"] == 1
 
 
 @pytest.mark.parametrize(
@@ -326,8 +324,9 @@ def test_cpu_dtype_propagates_through_store_gp_search_and_candidates(
 
     model_candidates = optimizer.suggest(2)
     assert model_candidates.dtype == torch_dtype
-    assert optimizer.store.continuous.dtype == torch_dtype
-    assert optimizer.store.y.dtype == torch_dtype
+    observations = optimizer.store.materialize()
+    assert observations.continuous.dtype == torch_dtype
+    assert observations.y.dtype == torch_dtype
     assert optimizer.surrogate is not None
     assert optimizer.surrogate.dtype == torch_dtype
     assert optimizer.surrogate.train_continuous is not None

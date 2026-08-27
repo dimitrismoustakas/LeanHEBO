@@ -20,7 +20,7 @@ from leanhebo.errors import NumericalError
 from leanhebo.gp.kernel import (
     MixedFeatureExtractor,
     build_kernel,
-    initialize_numeric_lengthscales,
+    initialize_base_numeric_lengthscales,
 )
 from leanhebo.transforms import IdentityScaler, TorchMinMaxScaler
 
@@ -97,11 +97,8 @@ class ExactGPSurrogate:
         self.train_categorical: torch.Tensor | None = None
         self.train_targets: torch.Tensor | None = None
         self.transform_version = -1
-        self.update_count = 0
-        self.full_refit_count = 0
         self.updates_since_full_refit = 0
         self.last_full_fit_observations = 0
-        self.posterior_calls = 0
 
     @property
     def fitted(self) -> bool:
@@ -216,11 +213,9 @@ class ExactGPSurrogate:
 
         report = self._optimize(kind, steps)
         if full_refit:
-            self.full_refit_count += 1
             self.updates_since_full_refit = 0
             self.last_full_fit_observations = targets.numel()
         else:
-            self.update_count += 1
             self.updates_since_full_refit += 1
         if self.diagnostics is not None:
             self.diagnostics.add_fit_report(report)
@@ -257,8 +252,8 @@ class ExactGPSurrogate:
 
     def _initialize_kernel(self, model: gpytorch.models.ExactGP) -> None:
         assert self.train_continuous is not None
-        initialize_numeric_lengthscales(
-            model.covar_module,
+        initialize_base_numeric_lengthscales(
+            model.covar_module.base_kernel,
             self.train_continuous,
             sample_limit=self.config.kernel_initialization_samples,
             lower_bound=self.config.lengthscale_lower_bound,
@@ -434,7 +429,6 @@ class ExactGPSurrogate:
             self.model.eval()
         if self.likelihood.training:
             self.likelihood.eval()
-        self.posterior_calls += 1
         if self.diagnostics is not None:
             self.diagnostics.increment("posterior.calls")
             self.diagnostics.increment("posterior.candidates", inputs[0].shape[0])

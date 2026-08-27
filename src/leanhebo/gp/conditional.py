@@ -10,7 +10,6 @@ from typing import Any, cast
 
 import gpytorch  # type: ignore[import-untyped]
 import torch
-from torch import nn
 
 from leanhebo.config import GPConfig, RuntimeConfig
 from leanhebo.data import EncodedBatch
@@ -23,6 +22,7 @@ from leanhebo.gp.conditional_kernel import (
 from leanhebo.gp.exact import ExactGPSurrogate
 from leanhebo.space.compiled import CompiledSpace
 from leanhebo.space.conditional import ConditionalSemantics
+from leanhebo.transforms.scalers import _ResizableBufferModule
 
 
 def _layout_from_semantics(semantics: ConditionalSemantics) -> ConditionalKernelLayout:
@@ -62,7 +62,7 @@ def _layout_from_semantics(semantics: ConditionalSemantics) -> ConditionalKernel
     return ConditionalKernelLayout(root_continuous, root_categorical, groups)
 
 
-class _MaskedMinMaxScaler(nn.Module):
+class _MaskedMinMaxScaler(_ResizableBufferModule):
     """Scale continuous columns from active observations and zero inactive values."""
 
     _resizable_buffers = ("data_min_", "data_max_", "scale_", "min_", "active_count_")
@@ -125,31 +125,8 @@ class _MaskedMinMaxScaler(nn.Module):
     def fitted(self) -> bool:
         return self._is_fitted
 
-    def _load_from_state_dict(
-        self,
-        state_dict: Mapping[str, Any],
-        prefix: str,
-        local_metadata: dict[str, Any],
-        strict: bool,
-        missing_keys: list[str],
-        unexpected_keys: list[str],
-        error_msgs: list[str],
-    ) -> None:
-        for name in self._resizable_buffers:
-            incoming = state_dict.get(prefix + name)
-            if isinstance(incoming, torch.Tensor):
-                current = getattr(self, name)
-                if current.shape != incoming.shape:
-                    setattr(self, name, torch.empty_like(incoming))
-        super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
+    def _load_from_state_dict(self, *args: Any, **kwargs: Any) -> None:
+        super()._load_from_state_dict(*args, **kwargs)
         self._is_fitted = bool(self._fitted.item())
 
     def _activity_mask(self, x: torch.Tensor, activity: torch.Tensor) -> torch.Tensor:
