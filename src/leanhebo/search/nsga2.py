@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from leanhebo.search.duplicates import _eliminate_canonical_duplicates
+from leanhebo.search.duplicates import _exact_duplicate_mask
 from leanhebo.search.operators import (
     _validate_generator,
     binary_tournament,
@@ -21,7 +21,7 @@ from leanhebo.search.operators import (
 )
 from leanhebo.search.repair import MixedVariableSpec, repair_population
 from leanhebo.search.sorting import crowding_distance, non_dominated_sort
-from leanhebo.search.survival import elitist_survival
+from leanhebo.search.survival import select_survivors
 
 Objective = Callable[[Tensor], Tensor]
 
@@ -113,7 +113,6 @@ def _discrete_lattice_completion(
     count: int,
     *,
     existing: Tensor,
-    atol: float,
 ) -> Tensor:
     """Enumerate deterministic unseen rows for a fully discrete search lattice."""
 
@@ -155,12 +154,8 @@ def _discrete_lattice_completion(
             else:
                 candidates[:, dimension] += codes.to(spec.lower.dtype)
         candidates = repair_population(candidates, spec)
-        candidates = _eliminate_canonical_duplicates(
-            candidates,
-            existing=torch.cat((existing, completed), dim=0),
-            spec=spec,
-            atol=atol,
-        )
+        seen = torch.cat((existing, completed), dim=0)
+        candidates = candidates[~_exact_duplicate_mask(candidates, seen)]
         completed = torch.cat((completed, candidates[: count - completed.shape[0]]), dim=0)
         if completed.shape[0] == count:
             break
@@ -188,7 +183,6 @@ class TorchNSGA2:
         mutation_eta: float = 20.0,
         tournament_size: int = 2,
         eliminate_duplicate_points: bool = True,
-        duplicate_tolerance: float = 0.0,
         max_duplicate_retries: int = 4,
     ) -> None:
         """Configure search work and operators."""
@@ -220,8 +214,6 @@ class TorchNSGA2:
             or tournament_size < 2
         ):
             raise ValueError("tournament_size must be at least two")
-        if not math.isfinite(duplicate_tolerance) or duplicate_tolerance < 0:
-            raise ValueError("duplicate_tolerance must be non-negative and finite")
         if (
             isinstance(max_duplicate_retries, bool)
             or not isinstance(max_duplicate_retries, int)
@@ -239,7 +231,6 @@ class TorchNSGA2:
         self.mutation_eta = mutation_eta
         self.tournament_size = tournament_size
         self.eliminate_duplicate_points = eliminate_duplicate_points
-        self.duplicate_tolerance = duplicate_tolerance
         self.max_duplicate_retries = max_duplicate_retries
 
     @staticmethod
@@ -278,11 +269,7 @@ class TorchNSGA2:
         )
         seeded = torch.cat((incumbent_rows, initial_rows), dim=0)
         if self.eliminate_duplicate_points and seeded.shape[0]:
-            seeded = _eliminate_canonical_duplicates(
-                seeded,
-                spec=spec,
-                atol=self.duplicate_tolerance,
-            )
+            seeded = seeded[~_exact_duplicate_mask(seeded)]
         population = seeded[: self.population_size]
 
         attempts = 0
@@ -291,12 +278,7 @@ class TorchNSGA2:
             draw_count = remaining if not self.eliminate_duplicate_points else max(remaining * 2, 4)
             candidates = sampler.draw(draw_count)
             if self.eliminate_duplicate_points:
-                candidates = _eliminate_canonical_duplicates(
-                    candidates,
-                    existing=population,
-                    spec=spec,
-                    atol=self.duplicate_tolerance,
-                )
+                candidates = candidates[~_exact_duplicate_mask(candidates, population)]
             take = min(remaining, candidates.shape[0])
             if take:
                 population = torch.cat((population, candidates[:take]), dim=0)
@@ -308,7 +290,6 @@ class TorchNSGA2:
                 spec,
                 self.population_size - population.shape[0],
                 existing=population,
-                atol=self.duplicate_tolerance,
             )
             population = torch.cat((population, completion), dim=0)
         if population.shape[0] == 0:  # A positive Sobol draw always yields at least one row.
@@ -413,12 +394,7 @@ class TorchNSGA2:
                 generator,
             )
             existing = torch.cat((population, offspring), dim=0)
-            candidates = _eliminate_canonical_duplicates(
-                candidates,
-                existing=existing,
-                spec=spec,
-                atol=self.duplicate_tolerance,
-            )
+            candidates = candidates[~_exact_duplicate_mask(candidates, existing)]
             offspring = torch.cat((offspring, candidates[:remaining]), dim=0)
 
         remaining = target - offspring.shape[0]
@@ -426,12 +402,8 @@ class TorchNSGA2:
             # Give variation one diverse Sobol refill before the exact discrete-lattice completion
             # below. Spaces with a continuous axis remain best-effort because they are not finite.
             candidates = sampler.draw(max(remaining * 2, 4))
-            candidates = _eliminate_canonical_duplicates(
-                candidates,
-                existing=torch.cat((population, offspring), dim=0),
-                spec=spec,
-                atol=self.duplicate_tolerance,
-            )
+            seen = torch.cat((population, offspring), dim=0)
+            candidates = candidates[~_exact_duplicate_mask(candidates, seen)]
             offspring = torch.cat((offspring, candidates[:remaining]), dim=0)
         remaining = target - offspring.shape[0]
         if remaining > 0:
@@ -439,7 +411,6 @@ class TorchNSGA2:
                 spec,
                 remaining,
                 existing=torch.cat((population, offspring), dim=0),
-                atol=self.duplicate_tolerance,
             )
             offspring = torch.cat((offspring, completion), dim=0)
         return offspring
@@ -490,19 +461,15 @@ class TorchNSGA2:
             candidate_evaluations += offspring.shape[0]
             combined_population = torch.cat((population, offspring), dim=0)
             combined_objectives = torch.cat((objectives, offspring_objectives), dim=0)
-            survival = elitist_survival(
-                combined_population,
-                combined_objectives,
-                population.shape[0],
-                # The initial population is unique, survivors remain a subset, and
-                # ``_make_offspring`` removes matches both within the batch and against the
-                # parents. Rechecking this invariant here only repeats quadratic row work.
-                eliminate_duplicate_points=False,
-            )
-            population = survival.population
-            objectives = survival.objectives
-            ranks = survival.ranks
-            crowding = survival.crowding.clone()
+            # The pool is duplicate-free by construction: the initial population is unique,
+            # survivors remain a subset, and ``_make_offspring`` removes matches both within
+            # the batch and against the parents.
+            selection = select_survivors(combined_objectives, population.shape[0])
+            survivors = selection.indices
+            population = combined_population[survivors]
+            objectives = combined_objectives[survivors]
+            ranks = selection.ranks[survivors]
+            crowding = selection.crowding[survivors].clone()
             # Every front before the final retained front survives intact, so its crowding values
             # remain valid. Only the possibly truncated final front needs to be refreshed.
             final_front = ranks == ranks.max()

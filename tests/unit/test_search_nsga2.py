@@ -110,25 +110,28 @@ def test_mixed_variable_minimize_preserves_steps_categories_and_context() -> Non
     assert bool(((result.population >= spec.lower) & (result.population <= spec.upper)).all())
 
 
-def test_combined_parent_offspring_pool_is_unique_before_survival(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    original_survival = nsga2_module.elitist_survival
+def test_combined_parent_offspring_pool_is_unique_every_generation() -> None:
     checked_generations = 0
 
-    def checked_survival(
-        population: torch.Tensor,
-        objectives: torch.Tensor,
-        n_survive: int,
-        **options: object,
-    ) -> object:
-        nonlocal checked_generations
-        assert not bool(duplicate_mask(population).any())
-        checked_generations += 1
-        return original_survival(population, objectives, n_survive, **options)
+    class CheckedNSGA2(TorchNSGA2):
+        def _make_offspring(
+            self,
+            population: torch.Tensor,
+            ranks: torch.Tensor,
+            crowding: torch.Tensor,
+            spec: MixedVariableSpec,
+            sampler: nsga2_module._SobolPopulationSampler,
+            generator: torch.Generator | None,
+        ) -> torch.Tensor:
+            nonlocal checked_generations
+            offspring = super()._make_offspring(
+                population, ranks, crowding, spec, sampler, generator
+            )
+            assert not bool(duplicate_mask(torch.cat((population, offspring))).any())
+            checked_generations += 1
+            return offspring
 
-    monkeypatch.setattr(nsga2_module, "elitist_survival", checked_survival)
-    optimizer = TorchNSGA2(
+    optimizer = CheckedNSGA2(
         MixedVariableSpec(torch.zeros(2), torch.ones(2)),
         population_size=24,
         generations=6,

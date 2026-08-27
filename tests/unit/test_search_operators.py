@@ -8,7 +8,6 @@ from leanhebo.search import (
     binary_tournament,
     categorical_mutation,
     duplicate_mask,
-    eliminate_duplicates,
     mixed_variable_crossover,
     mutate_population,
     repair_population,
@@ -70,10 +69,8 @@ def test_duplicate_detection_uses_repaired_integer_codes_and_stable_order() -> N
     )
 
     mask = duplicate_mask(population, spec=spec)
-    unique = eliminate_duplicates(population, spec=spec)
 
     assert mask.tolist() == [False, True, False]
-    assert torch.equal(unique, population[[0, 2]])
 
 
 def test_exact_duplicate_detection_preserves_existing_priority_and_signed_zero() -> None:

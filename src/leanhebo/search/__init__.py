@@ -9,10 +9,7 @@ from leanhebo.search.conditional import (
     semantic_duplicate_mask,
 )
 from leanhebo.search.conditional_operators import conditional_mutation
-from leanhebo.search.duplicates import (
-    duplicate_mask,
-    eliminate_duplicates,
-)
+from leanhebo.search.duplicates import duplicate_mask
 from leanhebo.search.nsga2 import NSGA2Result, TorchNSGA2
 from leanhebo.search.operators import (
     binary_tournament,
@@ -29,18 +26,12 @@ from leanhebo.search.sorting import (
     dominance_matrix,
     non_dominated_sort,
 )
-from leanhebo.search.survival import (
-    SurvivalResult,
-    SurvivalSelection,
-    elitist_survival,
-    select_survivors,
-)
+from leanhebo.search.survival import SurvivalSelection, select_survivors
 
 __all__ = [
     "ConditionalTorchNSGA2",
     "MixedVariableSpec",
     "NSGA2Result",
-    "SurvivalResult",
     "SurvivalSelection",
     "TorchNSGA2",
     "binary_tournament",
@@ -49,9 +40,7 @@ __all__ = [
     "crowding_distance",
     "dominance_matrix",
     "duplicate_mask",
-    "eliminate_duplicates",
     "eliminate_semantic_duplicates",
-    "elitist_survival",
     "mixed_variable_crossover",
     "mutate_population",
     "non_dominated_sort",

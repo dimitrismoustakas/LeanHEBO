@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Portions derived from Huawei HEBO; see NOTICE.md.
 
-"""Elitist NSGA-II parent-offspring survival."""
+"""Rank-and-crowding NSGA-II survival selection."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from leanhebo.search.duplicates import duplicate_mask
-from leanhebo.search.repair import MixedVariableSpec
 from leanhebo.search.sorting import crowding_distance, non_dominated_sort
 
 
@@ -19,17 +17,6 @@ from leanhebo.search.sorting import crowding_distance, non_dominated_sort
 class SurvivalSelection:
     """Indices and metrics produced while truncating one candidate pool."""
 
-    indices: Tensor
-    ranks: Tensor
-    crowding: Tensor
-
-
-@dataclass(frozen=True, slots=True)
-class SurvivalResult:
-    """Selected population, objectives, and source-pool metadata."""
-
-    population: Tensor
-    objectives: Tensor
     indices: Tensor
     ranks: Tensor
     crowding: Tensor
@@ -68,45 +55,3 @@ def select_survivors(objectives: Tensor, n_survive: int) -> SurvivalSelection:
     else:
         indices = torch.empty(0, dtype=torch.long, device=objectives.device)
     return SurvivalSelection(indices=indices, ranks=ranks, crowding=crowding)
-
-
-def elitist_survival(
-    population: Tensor,
-    objectives: Tensor,
-    n_survive: int,
-    *,
-    spec: MixedVariableSpec | None = None,
-    eliminate_duplicate_points: bool = True,
-    duplicate_tolerance: float = 0.0,
-) -> SurvivalResult:
-    """Apply canonical deduplication followed by rank-and-crowding survival."""
-
-    if population.ndim != 2:
-        raise ValueError("population must have shape [population, dimensions]")
-    if objectives.ndim != 2 or objectives.shape[0] != population.shape[0]:
-        raise ValueError("objectives must have one row for each population member")
-    if population.device != objectives.device:
-        raise ValueError("population and objectives must be on the same device")
-    if n_survive < 0:
-        raise ValueError("n_survive must be non-negative")
-
-    source_indices = torch.arange(population.shape[0], device=population.device)
-    if eliminate_duplicate_points:
-        keep = ~duplicate_mask(
-            population,
-            spec=spec,
-            atol=duplicate_tolerance,
-        )
-        source_indices = source_indices[keep]
-        population = population[keep]
-        objectives = objectives[keep]
-    target = min(n_survive, population.shape[0])
-    selection = select_survivors(objectives, target)
-    selected = selection.indices
-    return SurvivalResult(
-        population=population[selected],
-        objectives=objectives[selected],
-        indices=source_indices[selected],
-        ranks=selection.ranks[selected],
-        crowding=selection.crowding[selected],
-    )

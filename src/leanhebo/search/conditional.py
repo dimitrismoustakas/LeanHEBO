@@ -140,7 +140,6 @@ class ConditionalTorchNSGA2(TorchNSGA2):
             mutation_eta=mutation_eta,
             tournament_size=tournament_size,
             eliminate_duplicate_points=eliminate_duplicate_points,
-            duplicate_tolerance=0.0,
             max_duplicate_retries=max_duplicate_retries,
         )
         self.semantics = semantics
