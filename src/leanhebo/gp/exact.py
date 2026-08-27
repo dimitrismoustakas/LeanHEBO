@@ -9,7 +9,7 @@ import math
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
-from typing import Any, cast
+from typing import Any
 
 import gpytorch  # type: ignore[import-untyped]
 import torch
@@ -55,7 +55,12 @@ class _MixedExactGP(gpytorch.models.ExactGP):  # type: ignore[misc]
 
 
 class ExactGPSurrogate:
-    """Own an exact GP, likelihood, optimizer, training state, and prediction lifecycle."""
+    """Own an exact GP, likelihood, optimizer, training state, and prediction lifecycle.
+
+    Subclasses adapt the lifecycle through narrow hooks (`_store_training_data`,
+    `_train_inputs`, `_build_model`, `_initialize_kernel`, `_prepare_prediction_inputs`,
+    and `_restore_extra_training_state`) instead of overriding `fit` or `predict`.
+    """
 
     def __init__(
         self,
@@ -85,7 +90,7 @@ class ExactGPSurrogate:
         else:
             self.input_scaler = IdentityScaler()
         self.input_scaler.to(device=self.device, dtype=self.dtype)
-        self.model: _MixedExactGP | None = None
+        self.model: gpytorch.models.ExactGP | None = None
         self.likelihood: gpytorch.likelihoods.GaussianLikelihood | None = None
         self.optimizer: torch.optim.Adam | None = None
         self.train_continuous: torch.Tensor | None = None
@@ -129,11 +134,29 @@ class ExactGPSurrogate:
 
     def _prepare_prediction_inputs(
         self, continuous: torch.Tensor, categorical: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         continuous, categorical = self._coerce_inputs(continuous, categorical)
         if self.num_continuous and not self.input_scaler.fitted:
             raise RuntimeError("the GP input scaler has not been fitted")
         return self.input_scaler.transform(continuous).contiguous(), categorical
+
+    def _store_training_data(
+        self,
+        continuous: torch.Tensor,
+        categorical: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> None:
+        """Refit input scaling and retain the exact tensors the model will train on."""
+
+        self.input_scaler.fit(continuous)
+        self.train_continuous = self.input_scaler.transform(continuous).contiguous()
+        self.train_categorical = categorical
+        self.train_targets = targets
+
+    def _train_inputs(self) -> tuple[torch.Tensor, ...]:
+        assert self.train_continuous is not None
+        assert self.train_categorical is not None
+        return (self.train_continuous, self.train_categorical)
 
     def fit(
         self,
@@ -159,81 +182,40 @@ class ExactGPSurrogate:
         full_refit = first_fit or force_full_refit or self._full_refit_due(targets.numel())
         kind = "initial" if first_fit else ("full_refit" if full_refit else "update")
         steps = self.config.initial_steps if full_refit else self.config.update_steps
-        previous_model_state = self.model.state_dict() if self.model is not None else None
-        previous_likelihood_state = (
-            self.likelihood.state_dict() if self.likelihood is not None else None
-        )
-        transform_changed = self.transform_version != transform_version
+        if self.transform_version != transform_version and self.diagnostics is not None:
+            self.diagnostics.increment("gp.transform_invalidations")
 
-        if self.config.use_fantasy_updates and not full_refit:
-            fantasy_start = time.perf_counter()
-            skip_reason = self._try_fantasy_update(
-                continuous,
-                categorical,
-                targets,
-                transform_version=transform_version,
-            )
-            if skip_reason is None:
-                self.transform_version = transform_version
-                report = FitReport(
-                    kind="fantasy_update",
-                    observations=targets.numel(),
-                    requested_steps=0,
-                    completed_steps=0,
-                    final_loss=None,
-                    wall_time=time.perf_counter() - fantasy_start,
-                )
-                self.update_count += 1
-                self.updates_since_full_refit += 1
-                if self.diagnostics is not None:
-                    self.diagnostics.add_fit_report(report)
-                    self.diagnostics.increment("gp.fantasy_update")
-                return report
-            if self.diagnostics is not None:
-                self.diagnostics.increment("gp.fantasy_skipped")
-                self.diagnostics.increment(f"gp.fantasy_skipped.{skip_reason}")
-
-        self.input_scaler.fit(continuous)
-        continuous = self.input_scaler.transform(continuous).contiguous()
-
-        self.train_continuous = continuous
-        self.train_categorical = categorical
-        self.train_targets = targets
+        self._store_training_data(continuous, categorical, targets)
         self.transform_version = transform_version
 
         if full_refit or not self.config.use_set_train_data or not self.config.reuse_parameters:
-            retain_optimizer_state = (
-                self.optimizer.state_dict()
-                if not full_refit
-                and steps > 0
-                and self.config.reuse_optimizer_state
-                and self.optimizer is not None
-                else None
-            )
+            retain_model_state: Mapping[str, Any] | None = None
+            retain_likelihood_state: Mapping[str, Any] | None = None
+            if self.config.reuse_parameters and self.model is not None:
+                retain_model_state = self.model.state_dict()
+                assert self.likelihood is not None
+                retain_likelihood_state = self.likelihood.state_dict()
             self._construct_model(
-                retain_model_state=(
-                    previous_model_state if self.config.reuse_parameters and not first_fit else None
-                ),
-                retain_likelihood_state=(
-                    previous_likelihood_state
-                    if self.config.reuse_parameters and not first_fit
+                retain_model_state=retain_model_state,
+                retain_likelihood_state=retain_likelihood_state,
+                retain_optimizer_state=(
+                    self.optimizer.state_dict()
+                    if not full_refit
+                    and steps > 0
+                    and self.config.reuse_optimizer_state
+                    and self.optimizer is not None
                     else None
                 ),
-                retain_optimizer_state=retain_optimizer_state,
                 initialize_kernel=first_fit or not self.config.reuse_parameters,
             )
         else:
             assert self.model is not None
-            self.model.set_train_data(
-                inputs=(continuous, categorical), targets=targets, strict=False
-            )
+            self.model.set_train_data(inputs=self._train_inputs(), targets=targets, strict=False)
             if not self.config.reuse_optimizer_state:
                 self.optimizer = self._create_optimizer()
 
-        if transform_changed and self.diagnostics is not None:
-            self.diagnostics.increment("gp.transform_invalidations")
         report = self._optimize(kind, steps)
-        if first_fit or full_refit:
+        if full_refit:
             self.full_refit_count += 1
             self.updates_since_full_refit = 0
             self.last_full_fit_observations = targets.numel()
@@ -258,87 +240,30 @@ class ExactGPSurrogate:
             and observations >= math.ceil(self.last_full_fit_observations * growth)
         )
 
-    @torch.no_grad()
-    def _try_fantasy_update(
-        self,
-        continuous: torch.Tensor,
-        categorical: torch.Tensor,
-        targets: torch.Tensor,
-        *,
-        transform_version: int,
-    ) -> str | None:
-        """Append data through GPyTorch's exact cache update, or explain why it is inapplicable."""
+    def _build_model(
+        self, likelihood: gpytorch.likelihoods.GaussianLikelihood
+    ) -> gpytorch.models.ExactGP:
+        assert self.train_continuous is not None
+        assert self.train_categorical is not None
+        assert self.train_targets is not None
+        return _MixedExactGP(
+            self.train_continuous,
+            self.train_categorical,
+            self.train_targets,
+            likelihood,
+            category_sizes=self.category_sizes,
+            ard=self.config.ard,
+        )
 
-        if (
-            self.model is None
-            or self.likelihood is None
-            or self.optimizer is None
-            or self.train_continuous is None
-            or self.train_categorical is None
-            or self.train_targets is None
-        ):
-            return "missing_state"
-        if self.model.prediction_strategy is None:
-            return "missing_prediction_cache"
-        if transform_version != self.transform_version:
-            return "output_transform_changed"
-
-        old_count = self.train_targets.numel()
-        if targets.numel() <= old_count:
-            return "not_append_only"
-        if (
-            continuous.shape[0] != targets.numel()
-            or categorical.shape[0] != targets.numel()
-            or self.train_continuous.shape[0] != old_count
-            or self.train_categorical.shape[0] != old_count
-        ):
-            return "not_append_only"
-
-        new_continuous = continuous[old_count:]
-        if self.num_continuous:
-            scaler = cast(TorchMinMaxScaler, self.input_scaler)
-            if bool(
-                ((new_continuous < scaler.data_min_) | (new_continuous > scaler.data_max_))
-                .any()
-                .item()
-            ):
-                return "input_transform_changed"
-        scaled_continuous = self.input_scaler.transform(continuous).contiguous()
-        if not torch.equal(scaled_continuous[:old_count], self.train_continuous):
-            return "input_transform_changed"
-        if not torch.equal(categorical[:old_count], self.train_categorical):
-            return "not_append_only"
-        if not torch.equal(targets[:old_count], self.train_targets):
-            return "output_transform_changed"
-
-        old_prediction_strategy = self.model.prediction_strategy
-        old_train_inputs = self.model.train_inputs
-        old_train_targets = self.model.train_targets
-        old_model_likelihood = self.model.likelihood
-        try:
-            with (
-                self._settings(),
-                gpytorch.settings.fast_pred_var(self.config.fast_pred_var),
-            ):
-                fantasy_model = self.model.get_fantasy_model(
-                    [scaled_continuous[old_count:], categorical[old_count:]],
-                    targets[old_count:],
-                )
-        finally:
-            # GPyTorch temporarily removes these fields while deep-copying an ExactGP but does
-            # not protect that mutation with its own finally block.
-            self.model.prediction_strategy = old_prediction_strategy
-            self.model.train_inputs = old_train_inputs
-            self.model.train_targets = old_train_targets
-            self.model.likelihood = old_model_likelihood
-
-        self.model = cast(_MixedExactGP, fantasy_model)
-        self.likelihood = cast(gpytorch.likelihoods.GaussianLikelihood, fantasy_model.likelihood)
-        self.train_continuous = scaled_continuous
-        self.train_categorical = categorical
-        self.train_targets = targets
-        self.optimizer = self._create_optimizer()
-        return None
+    def _initialize_kernel(self, model: gpytorch.models.ExactGP) -> None:
+        assert self.train_continuous is not None
+        initialize_numeric_lengthscales(
+            model.covar_module,
+            self.train_continuous,
+            sample_limit=self.config.kernel_initialization_samples,
+            lower_bound=self.config.lengthscale_lower_bound,
+            generator=self.generator,
+        )
 
     def _construct_model(
         self,
@@ -348,8 +273,6 @@ class ExactGPSurrogate:
         retain_optimizer_state: Mapping[str, Any] | None,
         initialize_kernel: bool,
     ) -> None:
-        assert self.train_continuous is not None
-        assert self.train_categorical is not None
         assert self.train_targets is not None
         module_seed = int(
             torch.randint(
@@ -370,23 +293,10 @@ class ExactGPSurrogate:
             likelihood = gpytorch.likelihoods.GaussianLikelihood(
                 noise_constraint=constraint, noise_prior=prior
             ).to(device=self.device, dtype=self.dtype)
-            model = _MixedExactGP(
-                self.train_continuous,
-                self.train_categorical,
-                self.train_targets,
-                likelihood,
-                category_sizes=self.category_sizes,
-                ard=self.config.ard,
-            ).to(device=self.device, dtype=self.dtype)
+            model = self._build_model(likelihood).to(device=self.device, dtype=self.dtype)
         likelihood.noise = max(self.config.noise_initial, self.config.noise_lower_bound)
         if initialize_kernel:
-            initialize_numeric_lengthscales(
-                model.covar_module,
-                self.train_continuous,
-                sample_limit=self.config.kernel_initialization_samples,
-                lower_bound=self.config.lengthscale_lower_bound,
-                generator=self.generator,
-            )
+            self._initialize_kernel(model)
             variance = self.train_targets.var(unbiased=False).clamp_min(torch.finfo(self.dtype).eps)
             model.covar_module.outputscale = variance
         if retain_model_state is not None:
@@ -395,10 +305,9 @@ class ExactGPSurrogate:
             likelihood.load_state_dict(retain_likelihood_state)
         self.model = model
         self.likelihood = likelihood
-        optimizer = self._create_optimizer()
+        self.optimizer = self._create_optimizer()
         if retain_optimizer_state is not None:
-            optimizer.load_state_dict(dict(retain_optimizer_state))
-        self.optimizer = optimizer
+            self.optimizer.load_state_dict(dict(retain_optimizer_state))
 
     def _create_optimizer(self) -> torch.optim.Adam:
         assert self.model is not None
@@ -431,8 +340,6 @@ class ExactGPSurrogate:
         assert self.model is not None
         assert self.likelihood is not None
         assert self.optimizer is not None
-        assert self.train_continuous is not None
-        assert self.train_categorical is not None
         assert self.train_targets is not None
         start = time.perf_counter()
         self.model.train()
@@ -507,12 +414,10 @@ class ExactGPSurrogate:
 
     def _training_loss(self, mll: gpytorch.mlls.ExactMarginalLogLikelihood) -> torch.Tensor:
         assert self.model is not None
-        assert self.train_continuous is not None
-        assert self.train_categorical is not None
         assert self.train_targets is not None
 
         with self._settings():
-            distribution = self.model(self.train_continuous, self.train_categorical)
+            distribution = self.model(*self._train_inputs())
             loss: torch.Tensor = -mll(distribution, self.train_targets)
         return loss
 
@@ -524,7 +429,7 @@ class ExactGPSurrogate:
 
         if self.model is None or self.likelihood is None:
             raise RuntimeError("the GP has not been fitted")
-        continuous, categorical = self._prepare_prediction_inputs(continuous, categorical)
+        inputs = self._prepare_prediction_inputs(continuous, categorical)
         if self.model.training:
             self.model.eval()
         if self.likelihood.training:
@@ -532,16 +437,16 @@ class ExactGPSurrogate:
         self.posterior_calls += 1
         if self.diagnostics is not None:
             self.diagnostics.increment("posterior.calls")
-            self.diagnostics.increment("posterior.candidates", continuous.shape[0])
+            self.diagnostics.increment("posterior.candidates", inputs[0].shape[0])
         with (
             self._settings(),
             gpytorch.settings.fast_pred_var(self.config.fast_pred_var),
         ):
             if self.config.eval_cg_tolerance is None:
-                distribution = self.model(continuous, categorical)
+                distribution = self.model(*inputs)
             else:
                 with gpytorch.settings.eval_cg_tolerance(self.config.eval_cg_tolerance):
-                    distribution = self.model(continuous, categorical)
+                    distribution = self.model(*inputs)
             if self.config.predict_observation_noise:
                 distribution = self.likelihood(distribution)
         mean = distribution.mean.reshape(-1)
@@ -564,6 +469,11 @@ class ExactGPSurrogate:
             "last_full_fit_observations": self.last_full_fit_observations,
         }
 
+    def _restore_extra_training_state(self, state: Mapping[str, Any]) -> None:
+        """Restore subclass training tensors that model reconstruction depends on."""
+
+        del state
+
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
         scaler_state = state["input_scaler"]
         if not isinstance(scaler_state, Mapping):
@@ -584,6 +494,7 @@ class ExactGPSurrogate:
             self.train_targets = torch.as_tensor(
                 train_targets, device=self.device, dtype=self.dtype
             )
+            self._restore_extra_training_state(state)
             self._construct_model(
                 retain_model_state=state["model"],
                 retain_likelihood_state=state["likelihood"],

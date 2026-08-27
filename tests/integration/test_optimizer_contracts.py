@@ -309,44 +309,6 @@ def test_posterior_numerical_failure_is_not_retried(
     assert optimizer.surrogate.full_refit_count == 1
 
 
-def test_optimizer_uses_fantasy_update_when_preprocessing_and_cache_are_stable() -> None:
-    optimizer = LeanHEBO(
-        Space(Categorical("choice", tuple("abcdefgh"))),
-        config=LeanHEBOConfig(
-            random_samples=2,
-            runtime=RuntimeConfig(seed=41, acquisition_batch_size=None),
-            gp=GPConfig(
-                initial_steps=1,
-                update_steps=0,
-                full_refit_interval=None,
-                full_refit_growth_factor=None,
-                use_fantasy_updates=True,
-            ),
-            warp=WarpConfig(method="none", refit_interval=3),
-            search=SearchConfig(
-                population_size=4,
-                generations=0,
-                eliminate_duplicates=False,
-                seed=42,
-            ),
-        ),
-    )
-    initial = optimizer.suggest(2)
-    optimizer.observe(initial, _outcomes(initial))
-    first_model_candidate = optimizer.suggest(1)
-    optimizer.observe(first_model_candidate, _outcomes(first_model_candidate))
-    assert optimizer.surrogate is not None and optimizer.surrogate.model is not None
-    assert optimizer.surrogate.model.prediction_strategy is not None
-
-    second_model_candidate = optimizer.suggest(1)
-
-    assert len(second_model_candidate) == 1
-    assert optimizer.diagnostics.counters["gp.fantasy_update"] == 1
-    assert optimizer.diagnostics.fit_reports[-1].kind == "fantasy_update"
-    assert optimizer.surrogate.train_targets is not None
-    assert optimizer.surrogate.train_targets.shape == (3,)
-
-
 @pytest.mark.parametrize(
     ("configured_dtype", "torch_dtype"),
     [("float32", torch.float32), ("float64", torch.float64)],

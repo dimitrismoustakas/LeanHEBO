@@ -42,7 +42,6 @@ class GPConfig:
     reuse_parameters: bool = True
     reuse_optimizer_state: bool = True
     use_set_train_data: bool = True
-    use_fantasy_updates: bool = False
     noise_lower_bound: float = 8e-4
     noise_initial: float = 1e-2
     predict_observation_noise: bool = False
@@ -79,10 +78,6 @@ class GPConfig:
             raise ValueError("noise bounds and initial value must be positive and finite")
         if self.noise_initial <= self.noise_lower_bound:
             raise ValueError("noise_initial must be strictly greater than noise_lower_bound")
-        if self.use_fantasy_updates and self.update_steps != 0:
-            raise ValueError("fantasy updates require update_steps=0 so their cache remains valid")
-        if self.use_fantasy_updates and not self.reuse_parameters:
-            raise ValueError("fantasy updates require reuse_parameters=True")
         if self.reuse_optimizer_state and not self.reuse_parameters:
             raise ValueError("optimizer-state reuse requires reuse_parameters=True")
         if self.patience < 1:

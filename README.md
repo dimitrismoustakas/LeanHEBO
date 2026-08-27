@@ -119,11 +119,6 @@ restored = LeanHEBO.load("run.leanhebo", map_location="cpu")
 The checkpoint restores observations, transformations, model and optimizer state, Sobol progress,
 and independent Torch generator states.
 
-Optional fantasy updates condition the cached exact GP on appended observations when preprocessing
-is unchanged. They keep hyperparameters fixed between scheduled full refits, so they are opt-in and
-require `GPConfig(use_fantasy_updates=True, update_steps=0)`. Use a `WarpConfig` refit interval above
-one or `None` to benefit from the cached update between transform refits.
-
 ## Scope
 
 The `LeanHEBO` optimizer accepts one unconstrained objective and uses an exact Gaussian process,

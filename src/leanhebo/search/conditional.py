@@ -12,6 +12,7 @@ import torch
 from torch import Tensor
 
 from leanhebo.search.conditional_operators import conditional_mutation
+from leanhebo.search.duplicates import _exact_duplicate_mask
 from leanhebo.search.nsga2 import TorchNSGA2, _SobolPopulationSampler
 from leanhebo.search.operators import binary_tournament, mixed_variable_crossover
 from leanhebo.search.repair import MixedVariableSpec, repair_population
@@ -54,55 +55,12 @@ def _validate_semantic_keys(keys: Tensor, population: Tensor, *, name: str) -> N
 def _exact_key_duplicate_mask(keys: Tensor, existing_keys: Tensor | None = None) -> Tensor:
     """Mark exact duplicate key rows while preserving first-occurrence order."""
 
-    count, dimension = keys.shape
-    if count == 0:
-        return torch.zeros(0, dtype=torch.bool, device=keys.device)
-    if dimension == 0:
-        duplicates = torch.arange(count, device=keys.device) > 0
-        if existing_keys is not None and existing_keys.shape[0]:
-            duplicates.fill_(True)
-        return duplicates
-
     if existing_keys is not None and existing_keys.shape[0]:
-        if existing_keys.ndim != 2 or existing_keys.shape[1] != dimension:
+        if existing_keys.ndim != 2 or existing_keys.shape[1] != keys.shape[1]:
             raise ValueError("existing semantic keys have incompatible dimensions")
         if existing_keys.device != keys.device or existing_keys.dtype != keys.dtype:
             raise ValueError("existing semantic keys must share key device and dtype")
-
-    if keys.device.type == "cpu":
-        seen: set[tuple[object, ...]] = set()
-        if existing_keys is not None:
-            seen.update(tuple(row) for row in existing_keys.tolist())
-        duplicate_flags: list[bool] = []
-        for row in keys.tolist():
-            key = tuple(row)
-            duplicate_flags.append(key in seen)
-            seen.add(key)
-        return torch.tensor(duplicate_flags, dtype=torch.bool)
-
-    if existing_keys is None or existing_keys.shape[0] == 0:
-        combined = keys
-        offset = 0
-    else:
-        combined = torch.cat((existing_keys, keys), dim=0)
-        offset = existing_keys.shape[0]
-
-    unique, inverse = torch.unique(combined, dim=0, return_inverse=True)
-    indices = torch.arange(combined.shape[0], device=keys.device)
-    first_indices = torch.full(
-        (unique.shape[0],),
-        combined.shape[0],
-        dtype=torch.long,
-        device=keys.device,
-    )
-    first_indices.scatter_reduce_(
-        0,
-        inverse,
-        indices,
-        reduce="amin",
-        include_self=True,
-    )
-    return first_indices[inverse[offset:]] != indices[offset:]
+    return _exact_duplicate_mask(keys, existing_keys)
 
 
 def _semantic_keys(population: Tensor, semantics: ConditionalSearchSemantics) -> Tensor:

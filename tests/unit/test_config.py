@@ -35,19 +35,6 @@ def test_unknown_top_level_configuration_field_is_rejected() -> None:
         (lambda: RuntimeConfig(acquisition_batch_size=0), "acquisition_batch_size"),
         (lambda: GPConfig(full_refit_growth_factor=1.0), "growth_factor"),
         (
-            lambda: GPConfig(use_fantasy_updates=True),
-            "fantasy updates require update_steps=0",
-        ),
-        (
-            lambda: GPConfig(
-                update_steps=0,
-                use_fantasy_updates=True,
-                reuse_parameters=False,
-                reuse_optimizer_state=False,
-            ),
-            "reuse_parameters=True",
-        ),
-        (
             lambda: GPConfig(reuse_parameters=False, reuse_optimizer_state=True),
             "optimizer-state reuse requires reuse_parameters=True",
         ),

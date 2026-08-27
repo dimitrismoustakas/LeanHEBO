@@ -194,17 +194,7 @@ class LeanHEBO:
         else:
             unit = self._sobol.draw(count, dtype=self.dtype)
             self._sobol_draw_count += count
-        lower = self.space.dense_lower_bounds
-        upper = self.space.dense_upper_bounds
-        dense = lower + unit * (upper - lower)
-        discrete = self.space.rounding_mask
-        if bool(discrete.any()):
-            cardinality = (upper[discrete] - lower[discrete]).round() + 1
-            dense[:, discrete] = (
-                torch.floor(unit[:, discrete] * cardinality).clamp_max(cardinality - 1)
-                + lower[discrete]
-            )
-        dense = dense.to(device=self.device, dtype=self.dtype)
+        dense = self.space.dense_from_unit(unit).to(device=self.device, dtype=self.dtype)
         return self.space.candidate_from_dense(dense, fixed=fixed)
 
     def suggest(
@@ -318,6 +308,16 @@ class LeanHEBO:
             return mace(encoded.continuous, encoded.categorical)
 
         search_spec = self._search_spec(fixed)
+        search_options: dict[str, Any] = {
+            "population_size": self.config.search.population_size,
+            "generations": self.config.search.generations,
+            "crossover_probability": self.config.search.crossover_probability,
+            "crossover_eta": self.config.search.crossover_eta,
+            "mutation_probability": self.config.search.mutation_probability,
+            "mutation_eta": self.config.search.mutation_eta,
+            "tournament_size": self.config.search.tournament_size,
+            "eliminate_duplicate_points": self.config.search.eliminate_duplicates,
+        }
         search: TorchNSGA2
         if self.space.is_conditional:
             search = ConditionalTorchNSGA2(
@@ -327,27 +327,10 @@ class LeanHEBO:
                     fixed,
                     device=self.device,
                 ),
-                population_size=self.config.search.population_size,
-                generations=self.config.search.generations,
-                crossover_probability=self.config.search.crossover_probability,
-                crossover_eta=self.config.search.crossover_eta,
-                mutation_probability=self.config.search.mutation_probability,
-                mutation_eta=self.config.search.mutation_eta,
-                tournament_size=self.config.search.tournament_size,
-                eliminate_duplicate_points=self.config.search.eliminate_duplicates,
+                **search_options,
             )
         else:
-            search = TorchNSGA2(
-                search_spec,
-                population_size=self.config.search.population_size,
-                generations=self.config.search.generations,
-                crossover_probability=self.config.search.crossover_probability,
-                crossover_eta=self.config.search.crossover_eta,
-                mutation_probability=self.config.search.mutation_probability,
-                mutation_eta=self.config.search.mutation_eta,
-                tournament_size=self.config.search.tournament_size,
-                eliminate_duplicate_points=self.config.search.eliminate_duplicates,
-            )
+            search = TorchNSGA2(search_spec, **search_options)
         previous = (
             self._previous_population if self.config.search.reuse_previous_population else None
         )
@@ -364,9 +347,8 @@ class LeanHEBO:
             if self.config.search.reuse_previous_population
             else None
         )
+        # A non-empty population always has a rank-zero front.
         pool = result.pareto_population
-        if pool.shape[0] == 0:
-            pool = result.population
         candidates = self.space.candidate_from_dense(pool, fixed=fixed)
         unique = self.store.unique_mask(candidates)
         candidates = candidates.select(unique)

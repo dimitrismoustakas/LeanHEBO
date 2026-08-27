@@ -35,17 +35,15 @@ def _branch_space() -> CompiledSpace:
 def _surrogate(
     space: CompiledSpace,
     *,
-    fantasy: bool = False,
     seed: int = 7,
 ) -> ConditionalExactGPSurrogate:
     return ConditionalExactGPSurrogate(
         space=space,
         config=GPConfig(
             initial_steps=2,
-            update_steps=0 if fantasy else 1,
+            update_steps=1,
             full_refit_interval=None,
             full_refit_growth_factor=None,
-            use_fantasy_updates=fantasy,
         ),
         runtime=RuntimeConfig(dtype="float64", seed=seed),
         generator=torch.Generator().manual_seed(seed),
@@ -537,37 +535,3 @@ def test_any_condition_ignores_an_inactive_alternative_parent() -> None:
     mean, variance, _ = surrogate.predict(alternatives.continuous, alternatives.categorical)
     torch.testing.assert_close(mean[0], mean[1], rtol=0.0, atol=0.0)
     torch.testing.assert_close(variance[0], variance[1], rtol=0.0, atol=0.0)
-
-
-def test_conditional_fantasy_update_appends_internal_activity() -> None:
-    space = _branch_space()
-    surrogate = _surrogate(space, fantasy=True)
-    initial = EncodedBatch(
-        torch.tensor([[0.0, 0.2], [0.5, 0.8], [1.0, 0.4]], dtype=torch.float64),
-        torch.tensor([[1], [1], [0]], dtype=torch.int64),
-    )
-    targets = torch.tensor([0.0, 0.2, 0.8], dtype=torch.float64)
-    surrogate.fit(initial.continuous, initial.categorical, targets, transform_version=0)
-    surrogate.predict(initial.continuous, initial.categorical)
-
-    appended = EncodedBatch(
-        torch.cat(
-            (
-                initial.continuous,
-                torch.tensor([[0.75, 0.95]], dtype=torch.float64),
-            )
-        ),
-        torch.cat((initial.categorical, torch.tensor([[0]], dtype=torch.int64))),
-    )
-    report = surrogate.fit(
-        appended.continuous,
-        appended.categorical,
-        torch.cat((targets, torch.tensor([0.7], dtype=torch.float64))),
-        transform_version=0,
-    )
-
-    assert report.kind == "fantasy_update"
-    assert surrogate.optimizer is not None
-    assert not surrogate.optimizer.state
-    assert surrogate.train_activity is not None
-    assert surrogate.train_activity[:, 0].tolist() == [True, True, False, False]

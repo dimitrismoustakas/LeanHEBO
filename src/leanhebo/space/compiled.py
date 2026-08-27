@@ -427,6 +427,25 @@ class CompiledSpace:
         encoded = self.encode(value)
         return encoded.to_dense()
 
+    def dense_from_unit(self, unit: torch.Tensor) -> torch.Tensor:
+        """Map unit-cube samples onto dense coordinates, snapping discrete lattices."""
+
+        if not isinstance(unit, torch.Tensor) or not unit.is_floating_point():
+            raise TypeError("unit samples must be a floating tensor")
+        if unit.ndim != 2 or unit.shape[1] != self.dense_dimension:
+            raise ValueError(f"unit samples must have shape [rows, {self.dense_dimension}]")
+        lower = self.dense_lower_bounds.to(device=unit.device, dtype=unit.dtype)
+        upper = self.dense_upper_bounds.to(device=unit.device, dtype=unit.dtype)
+        dense = lower + unit * (upper - lower)
+        discrete = self.rounding_mask.to(device=unit.device)
+        if bool(discrete.any()):
+            cardinality = (upper[discrete] - lower[discrete]).round() + 1
+            dense[:, discrete] = (
+                torch.floor(unit[:, discrete] * cardinality).clamp_max(cardinality - 1)
+                + lower[discrete]
+            )
+        return dense
+
     def encoded_from_dense(
         self,
         dense: torch.Tensor,
@@ -599,17 +618,7 @@ class CompiledSpace:
                 self.dense_dimension, scramble=scramble, seed=seed
             )
             unit = engine.draw(count, dtype=self.dtype)
-        dense = torch.empty_like(unit)
-        dense_parameters = self._continuous_parameters + self._categorical_parameters
-        for index, parameter in enumerate(dense_parameters):
-            lower, upper = parameter.optimization_bounds
-            if parameter.is_discrete_after_transform:
-                cardinality = round(upper - lower) + 1
-                dense[:, index] = (
-                    torch.floor(unit[:, index] * cardinality).clamp_max(cardinality - 1) + lower
-                )
-            else:
-                dense[:, index] = lower + unit[:, index] * (upper - lower)
+        dense = self.dense_from_unit(unit)
         if device is not None:
             dense = dense.to(device=device)
         fixed_input = self._coerce_fixed(fixed)
