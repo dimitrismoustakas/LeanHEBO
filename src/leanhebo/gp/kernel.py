@@ -40,6 +40,11 @@ class MixedFeatureExtractor(nn.Module):
             raise ValueError("unexpected number of continuous GP inputs")
         if categorical.shape[1] != len(self.embeddings):
             raise ValueError("unexpected number of categorical GP inputs")
+        return self._forward_unchecked(continuous, categorical)
+
+    def _forward_unchecked(
+        self, continuous: torch.Tensor, categorical: torch.Tensor
+    ) -> torch.Tensor:
         if not self.embeddings:
             return continuous
         embedded = [

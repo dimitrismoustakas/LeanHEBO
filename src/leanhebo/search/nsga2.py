@@ -14,14 +14,22 @@ from torch import Tensor
 
 from leanhebo.search.duplicates import _exact_duplicate_mask
 from leanhebo.search.operators import (
+    _binary_tournament_unchecked,
+    _mixed_variable_crossover_unchecked,
+    _mutate_population_unchecked,
     _validate_generator,
-    binary_tournament,
-    mixed_variable_crossover,
-    mutate_population,
 )
-from leanhebo.search.repair import MixedVariableSpec, repair_population
-from leanhebo.search.sorting import crowding_distance, non_dominated_sort
-from leanhebo.search.survival import select_survivors
+from leanhebo.search.repair import (
+    MixedVariableSpec,
+    _repair_population_unchecked,
+    repair_population,
+)
+from leanhebo.search.sorting import (
+    _front_crowding,
+    _non_dominated_sort_unchecked,
+    _ranked_crowding,
+)
+from leanhebo.search.survival import _select_survivors_unchecked
 
 Objective = Callable[[Tensor], Tensor]
 
@@ -91,8 +99,8 @@ class _SobolPopulationSampler:
         )
         population = self._spec.lower + unit * (self._spec.upper - self._spec.lower)
 
-        integer = self._spec.integer_mask & ~self._spec.fixed_mask
-        if bool(integer.any()):
+        integer = self._spec.mutable_integer_mask
+        if self._spec.has_integer:
             steps = self._spec.steps[integer]
             cardinality = (
                 torch.floor((self._spec.upper[integer] - self._spec.lower[integer]) / steps) + 1
@@ -100,12 +108,12 @@ class _SobolPopulationSampler:
             codes = torch.floor(unit[:, integer] * cardinality).clamp_max(cardinality - 1)
             population[:, integer] = self._spec.lower[integer] + codes * steps
 
-        categorical = self._spec.categorical_mask & ~self._spec.fixed_mask
-        if bool(categorical.any()):
+        categorical = self._spec.mutable_categorical_mask
+        if self._spec.has_categorical:
             cardinality = self._spec.upper[categorical] - self._spec.lower[categorical] + 1
             codes = torch.floor(unit[:, categorical] * cardinality).clamp_max(cardinality - 1)
             population[:, categorical] = self._spec.lower[categorical] + codes
-        return repair_population(population, self._spec)
+        return _repair_population_unchecked(population, self._spec)
 
 
 def _discrete_lattice_completion(
@@ -153,7 +161,7 @@ def _discrete_lattice_completion(
                 candidates[:, dimension] += codes.to(spec.lower.dtype) * spec.steps[dimension]
             else:
                 candidates[:, dimension] += codes.to(spec.lower.dtype)
-        candidates = repair_population(candidates, spec)
+        candidates = _repair_population_unchecked(candidates, spec)
         seen = torch.cat((existing, completed), dim=0)
         candidates = candidates[~_exact_duplicate_mask(candidates, seen)]
         completed = torch.cat((completed, candidates[: count - completed.shape[0]]), dim=0)
@@ -333,7 +341,7 @@ class TorchNSGA2:
         generator: torch.Generator | None,
     ) -> Tensor:
         pair_count = math.ceil(count / 2)
-        parent_indices = binary_tournament(
+        parent_indices = _binary_tournament_unchecked(
             ranks,
             crowding,
             pair_count * 2,
@@ -342,7 +350,7 @@ class TorchNSGA2:
         )
         parent_a = population[parent_indices[0::2]]
         parent_b = population[parent_indices[1::2]]
-        child_a, child_b = mixed_variable_crossover(
+        child_a, child_b = _mixed_variable_crossover_unchecked(
             parent_a,
             parent_b,
             spec,
@@ -352,7 +360,7 @@ class TorchNSGA2:
             generator=generator,
         )
         children = torch.stack((child_a, child_b), dim=1).reshape(-1, spec.dimension)[:count]
-        return mutate_population(
+        return _mutate_population_unchecked(
             children,
             spec,
             probability=self.mutation_probability,
@@ -435,8 +443,8 @@ class TorchNSGA2:
             initial_population=initial_population,
         )
         objectives = self._evaluate(objective, population)
-        ranks = non_dominated_sort(objectives)
-        crowding = crowding_distance(objectives, ranks)
+        ranks, _ = _non_dominated_sort_unchecked(objectives)
+        crowding = _ranked_crowding(objectives, ranks)
         completed_generations = 0
         objective_calls = 1
         candidate_evaluations = population.shape[0]
@@ -464,7 +472,7 @@ class TorchNSGA2:
             # The pool is duplicate-free by construction: the initial population is unique,
             # survivors remain a subset, and ``_make_offspring`` removes matches both within
             # the batch and against the parents.
-            selection = select_survivors(combined_objectives, population.shape[0])
+            selection = _select_survivors_unchecked(combined_objectives, population.shape[0])
             survivors = selection.indices
             population = combined_population[survivors]
             objectives = combined_objectives[survivors]
@@ -473,7 +481,7 @@ class TorchNSGA2:
             # Every front before the final retained front survives intact, so its crowding values
             # remain valid. Only the possibly truncated final front needs to be refreshed.
             final_front = ranks == ranks.max()
-            crowding[final_front] = crowding_distance(objectives[final_front])
+            crowding[final_front] = _front_crowding(objectives[final_front])
             completed_generations += 1
 
         return NSGA2Result(

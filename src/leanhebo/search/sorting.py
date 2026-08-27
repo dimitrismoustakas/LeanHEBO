@@ -29,6 +29,10 @@ def dominance_matrix(objectives: Tensor) -> Tensor:
     """
 
     _validate_objectives(objectives)
+    return _dominance_matrix_unchecked(objectives)
+
+
+def _dominance_matrix_unchecked(objectives: Tensor) -> Tensor:
     no_worse = (objectives[:, None, :] <= objectives[None, :, :]).all(dim=-1)
     # For finite values, i is strictly better than j in at least one objective exactly when
     # i is no worse than j but j is not no worse than i. Reusing the transpose avoids a second
@@ -39,7 +43,18 @@ def dominance_matrix(objectives: Tensor) -> Tensor:
 def non_dominated_sort(objectives: Tensor) -> Tensor:
     """Assign zero-based Pareto ranks to a minimization objective matrix."""
 
-    dominates = dominance_matrix(objectives)
+    _validate_objectives(objectives)
+    ranks, _ = _non_dominated_sort_unchecked(objectives)
+    return ranks
+
+
+def _non_dominated_sort_unchecked(
+    objectives: Tensor,
+    stop_after: int | None = None,
+) -> tuple[Tensor, int | None]:
+    """Rank an internal objective matrix, optionally replacing unused tail ranks by a sentinel."""
+
+    dominates = _dominance_matrix_unchecked(objectives)
     population_size = dominates.shape[0]
     ranks = torch.full(
         (population_size,),
@@ -48,21 +63,30 @@ def non_dominated_sort(objectives: Tensor) -> Tensor:
         device=dominates.device,
     )
     if population_size == 0:
-        return ranks
+        return ranks, None
+    if stop_after == 0:
+        ranks.fill_(0)
+        return ranks, 0
 
     domination_count = dominates.sum(dim=0, dtype=torch.long)
     current = torch.nonzero(domination_count == 0, as_tuple=False).flatten()
     rank = 0
+    ranked_count = 0
 
     while current.numel():
         ranks[current] = rank
+        ranked_count += current.numel()
+        if stop_after is not None and ranked_count >= stop_after and ranked_count < population_size:
+            tail_rank = rank + 1
+            ranks[ranks < 0] = tail_rank
+            return ranks, tail_rank
         domination_count = domination_count - dominates[current].sum(dim=0, dtype=torch.long)
         current = torch.nonzero((domination_count == 0) & (ranks < 0), as_tuple=False).flatten()
         rank += 1
 
     if bool((ranks < 0).any()):  # Defensive: strict dominance should always form a DAG.
         raise RuntimeError("non-dominated sorting failed to assign every point")
-    return ranks
+    return ranks, None
 
 
 def _front_crowding(objectives: Tensor) -> Tensor:

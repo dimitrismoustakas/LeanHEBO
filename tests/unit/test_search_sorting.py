@@ -94,6 +94,40 @@ def test_survival_takes_full_front_then_most_isolated_split_front() -> None:
     assert selection.indices[3].item() == 3
 
 
+def test_truncated_survival_matches_full_ranking_on_every_retained_point() -> None:
+    generator = torch.Generator().manual_seed(211)
+    objectives = torch.rand((200, 3), generator=generator)
+    full_ranks = non_dominated_sort(objectives)
+    full_crowding = crowding_distance(objectives, full_ranks)
+    n_survive = 100
+
+    expected: list[torch.Tensor] = []
+    selected_count = 0
+    for rank in torch.unique(full_ranks, sorted=True):
+        front = torch.nonzero(full_ranks == rank, as_tuple=False).flatten()
+        remaining = n_survive - selected_count
+        if front.numel() <= remaining:
+            expected.append(front)
+            selected_count += front.numel()
+            continue
+        order = torch.argsort(full_crowding[front], descending=True, stable=True)
+        expected.append(front[order[:remaining]])
+        break
+
+    selection = select_survivors(objectives, n_survive)
+    expected_indices = torch.cat(expected)
+
+    assert torch.equal(selection.indices, expected_indices)
+    assert torch.equal(selection.ranks[selection.indices], full_ranks[expected_indices])
+    actual_crowding = selection.crowding[selection.indices]
+    expected_crowding = full_crowding[expected_indices]
+    assert torch.equal(torch.isinf(actual_crowding), torch.isinf(expected_crowding))
+    assert torch.equal(
+        actual_crowding[torch.isfinite(actual_crowding)],
+        expected_crowding[torch.isfinite(expected_crowding)],
+    )
+
+
 def test_empty_objective_matrix_has_empty_ranks_and_crowding() -> None:
     objectives = torch.empty((0, 3))
 

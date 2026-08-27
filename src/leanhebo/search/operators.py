@@ -10,7 +10,10 @@ import math
 import torch
 from torch import Tensor
 
-from leanhebo.search.repair import MixedVariableSpec, repair_population
+from leanhebo.search.repair import (
+    MixedVariableSpec,
+    _repair_population_unchecked,
+)
 
 
 def _validate_probability(value: float, *, name: str) -> None:
@@ -65,6 +68,23 @@ def binary_tournament(
         raise ValueError("cannot select from an empty population")
 
     _validate_generator(generator, ranks.device)
+    return _binary_tournament_unchecked(
+        ranks,
+        crowding,
+        n_select,
+        generator=generator,
+        tournament_size=tournament_size,
+    )
+
+
+def _binary_tournament_unchecked(
+    ranks: Tensor,
+    crowding: Tensor,
+    n_select: int,
+    *,
+    generator: torch.Generator | None,
+    tournament_size: int,
+) -> Tensor:
     contestants = torch.randint(
         ranks.numel(),
         (n_select, tournament_size),
@@ -149,6 +169,32 @@ def sbx_crossover(
         numeric_mask = torch.as_tensor(numeric_mask, dtype=torch.bool, device=parent_a.device)
         if numeric_mask.shape != lower.shape:
             raise ValueError("numeric_mask must contain one entry per dimension")
+
+    return _sbx_crossover_unchecked(
+        parent_a,
+        parent_b,
+        lower,
+        upper,
+        numeric_mask=numeric_mask,
+        probability=probability,
+        dimension_probability=dimension_probability,
+        eta=eta,
+        generator=generator,
+    )
+
+
+def _sbx_crossover_unchecked(
+    parent_a: Tensor,
+    parent_b: Tensor,
+    lower: Tensor,
+    upper: Tensor,
+    *,
+    numeric_mask: Tensor,
+    probability: float,
+    dimension_probability: float,
+    eta: float,
+    generator: torch.Generator | None,
+) -> tuple[Tensor, Tensor]:
 
     pair_count, dimension = parent_a.shape
     if pair_count == 0:
@@ -251,6 +297,26 @@ def uniform_categorical_crossover(
     if parent_a.shape[0] == 0 or not bool(categorical_mask.any()):
         return parent_a.clone(), parent_b.clone()
 
+    return _uniform_categorical_crossover_unchecked(
+        parent_a,
+        parent_b,
+        categorical_mask,
+        probability=probability,
+        dimension_probability=dimension_probability,
+        generator=generator,
+    )
+
+
+def _uniform_categorical_crossover_unchecked(
+    parent_a: Tensor,
+    parent_b: Tensor,
+    categorical_mask: Tensor,
+    *,
+    probability: float,
+    dimension_probability: float,
+    generator: torch.Generator | None,
+) -> tuple[Tensor, Tensor]:
+
     pair_gate = (
         torch.rand(
             (parent_a.shape[0], 1),
@@ -283,7 +349,34 @@ def mixed_variable_crossover(
 ) -> tuple[Tensor, Tensor]:
     """Combine SBX on numeric columns with uniform categorical crossover."""
 
-    child_a, child_b = sbx_crossover(
+    _validate_parent_tensors(parent_a, parent_b, spec.lower, spec.upper)
+    _validate_probability(probability, name="probability")
+    _validate_probability(dimension_probability, name="dimension_probability")
+    if not math.isfinite(eta) or eta <= 0:
+        raise ValueError("eta must be positive and finite")
+    _validate_generator(generator, parent_a.device)
+    return _mixed_variable_crossover_unchecked(
+        parent_a,
+        parent_b,
+        spec,
+        probability=probability,
+        dimension_probability=dimension_probability,
+        eta=eta,
+        generator=generator,
+    )
+
+
+def _mixed_variable_crossover_unchecked(
+    parent_a: Tensor,
+    parent_b: Tensor,
+    spec: MixedVariableSpec,
+    *,
+    probability: float,
+    dimension_probability: float,
+    eta: float,
+    generator: torch.Generator | None,
+) -> tuple[Tensor, Tensor]:
+    child_a, child_b = _sbx_crossover_unchecked(
         parent_a,
         parent_b,
         spec.lower,
@@ -294,18 +387,22 @@ def mixed_variable_crossover(
         eta=eta,
         generator=generator,
     )
-    categorical = spec.mutable_categorical_mask
-    categorical_a, categorical_b = uniform_categorical_crossover(
-        parent_a,
-        parent_b,
-        categorical,
-        probability=probability,
-        dimension_probability=dimension_probability,
-        generator=generator,
+    if spec.has_categorical:
+        categorical = spec.mutable_categorical_mask
+        categorical_a, categorical_b = _uniform_categorical_crossover_unchecked(
+            parent_a,
+            parent_b,
+            categorical,
+            probability=probability,
+            dimension_probability=dimension_probability,
+            generator=generator,
+        )
+        child_a = torch.where(categorical, categorical_a, child_a)
+        child_b = torch.where(categorical, categorical_b, child_b)
+    return (
+        _repair_population_unchecked(child_a, spec),
+        _repair_population_unchecked(child_b, spec),
     )
-    child_a = torch.where(categorical, categorical_a, child_a)
-    child_b = torch.where(categorical, categorical_b, child_b)
-    return repair_population(child_a, spec), repair_population(child_b, spec)
 
 
 def polynomial_mutation(
@@ -338,6 +435,30 @@ def polynomial_mutation(
     if population.shape[0] == 0 or mutable_count == 0 or probability == 0:
         return population.clone()
 
+    return _polynomial_mutation_unchecked(
+        population,
+        lower,
+        upper,
+        numeric_mask=mutable,
+        probability=probability,
+        eta=eta,
+        generator=generator,
+    )
+
+
+def _polynomial_mutation_unchecked(
+    population: Tensor,
+    lower: Tensor,
+    upper: Tensor,
+    *,
+    numeric_mask: Tensor,
+    probability: float,
+    eta: float,
+    generator: torch.Generator | None,
+) -> Tensor:
+    if population.shape[0] == 0 or probability == 0:
+        return population.clone()
+
     span = upper - lower
     safe_span = span.clamp_min(torch.finfo(population.dtype).eps)
     clipped = population.clamp(min=lower, max=upper)
@@ -351,7 +472,7 @@ def polynomial_mutation(
     )
     mutate = (
         torch.rand(population.shape, device=population.device, generator=generator) < probability
-    ) & mutable
+    ) & numeric_mask
     mutation_power = 1.0 / (eta + 1.0)
 
     lower_branch = random <= 0.5
@@ -394,9 +515,32 @@ def categorical_mutation(
     if population.shape[0] == 0 or mutable_count == 0 or probability == 0:
         return population.clone()
 
+    return _categorical_mutation_unchecked(
+        population,
+        lower,
+        upper,
+        categorical_mask=mutable,
+        probability=probability,
+        generator=generator,
+    )
+
+
+def _categorical_mutation_unchecked(
+    population: Tensor,
+    lower: Tensor,
+    upper: Tensor,
+    *,
+    categorical_mask: Tensor,
+    probability: float,
+    generator: torch.Generator | None,
+) -> Tensor:
+    if population.shape[0] == 0 or probability == 0:
+        return population.clone()
+    counts = torch.round(upper - lower + 1.0).to(torch.long)
+
     mutate = (
         torch.rand(population.shape, device=population.device, generator=generator) < probability
-    ) & mutable
+    ) & categorical_mask
     random = torch.rand(
         population.shape,
         dtype=population.dtype,
@@ -420,24 +564,53 @@ def mutate_population(
 ) -> Tensor:
     """Apply numeric and alternative-category mutation, then canonical repair."""
 
+    _validate_parent_tensors(population, population, spec.lower, spec.upper)
+    if not math.isfinite(eta) or eta <= 0:
+        raise ValueError("eta must be positive and finite")
+    _validate_generator(generator, population.device)
     if probability is None:
-        mutable_count = int((~spec.fixed_mask).sum().item())
-        probability = 0.0 if mutable_count == 0 else 1.0 / mutable_count
-    numeric = polynomial_mutation(
+        probability = 0.0 if spec.mutable_count == 0 else 1.0 / spec.mutable_count
+    _validate_probability(probability, name="probability")
+    return _mutate_population_unchecked(
         population,
-        spec.lower,
-        spec.upper,
-        numeric_mask=spec.mutable_numeric_mask,
+        spec,
         probability=probability,
         eta=eta,
         generator=generator,
     )
-    mixed = categorical_mutation(
-        numeric,
-        spec.lower,
-        spec.upper,
-        spec.mutable_categorical_mask,
-        probability=probability,
-        generator=generator,
-    )
-    return repair_population(mixed, spec)
+
+
+def _mutate_population_unchecked(
+    population: Tensor,
+    spec: MixedVariableSpec,
+    *,
+    probability: float | None,
+    eta: float,
+    generator: torch.Generator | None,
+) -> Tensor:
+    if probability is None:
+        probability = 0.0 if spec.mutable_count == 0 else 1.0 / spec.mutable_count
+    if spec.has_numeric:
+        numeric = _polynomial_mutation_unchecked(
+            population,
+            spec.lower,
+            spec.upper,
+            numeric_mask=spec.mutable_numeric_mask,
+            probability=probability,
+            eta=eta,
+            generator=generator,
+        )
+    else:
+        numeric = population.clone()
+    if spec.has_categorical:
+        mixed = _categorical_mutation_unchecked(
+            numeric,
+            spec.lower,
+            spec.upper,
+            categorical_mask=spec.mutable_categorical_mask,
+            probability=probability,
+            generator=generator,
+        )
+    else:
+        mixed = numeric
+    return _repair_population_unchecked(mixed, spec)

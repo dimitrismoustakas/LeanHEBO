@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 import torch
@@ -55,6 +55,15 @@ class MixedVariableSpec:
     steps: Tensor
     fixed_mask: Tensor
     fixed_values: Tensor
+    _numeric_mask: Tensor = field(init=False, repr=False, compare=False)
+    _mutable_numeric_mask: Tensor = field(init=False, repr=False, compare=False)
+    _mutable_integer_mask: Tensor = field(init=False, repr=False, compare=False)
+    _mutable_categorical_mask: Tensor = field(init=False, repr=False, compare=False)
+    has_numeric: bool = field(init=False, repr=False, compare=False)
+    has_integer: bool = field(init=False, repr=False, compare=False)
+    has_categorical: bool = field(init=False, repr=False, compare=False)
+    has_fixed: bool = field(init=False, repr=False, compare=False)
+    mutable_count: int = field(init=False, repr=False, compare=False)
 
     def __init__(
         self,
@@ -174,6 +183,20 @@ class MixedVariableSpec:
         object.__setattr__(self, "steps", steps)
         object.__setattr__(self, "fixed_mask", fixed_mask)
         object.__setattr__(self, "fixed_values", fixed_values)
+        mutable_mask = ~fixed_mask
+        numeric_mask = ~categorical_mask
+        mutable_numeric_mask = numeric_mask & mutable_mask
+        mutable_integer_mask = integer_mask & mutable_mask
+        mutable_categorical_mask = categorical_mask & mutable_mask
+        object.__setattr__(self, "_numeric_mask", numeric_mask)
+        object.__setattr__(self, "_mutable_numeric_mask", mutable_numeric_mask)
+        object.__setattr__(self, "_mutable_integer_mask", mutable_integer_mask)
+        object.__setattr__(self, "_mutable_categorical_mask", mutable_categorical_mask)
+        object.__setattr__(self, "has_numeric", bool(mutable_numeric_mask.any()))
+        object.__setattr__(self, "has_integer", bool(mutable_integer_mask.any()))
+        object.__setattr__(self, "has_categorical", bool(mutable_categorical_mask.any()))
+        object.__setattr__(self, "has_fixed", bool(fixed_mask.any()))
+        object.__setattr__(self, "mutable_count", int(mutable_mask.sum().item()))
 
     @property
     def dimension(self) -> int:
@@ -185,19 +208,25 @@ class MixedVariableSpec:
     def numeric_mask(self) -> Tensor:
         """Mask of continuous and integer (but not categorical) columns."""
 
-        return ~self.categorical_mask
+        return self._numeric_mask
 
     @property
     def mutable_numeric_mask(self) -> Tensor:
         """Mask of numeric columns that evolutionary operators may change."""
 
-        return self.numeric_mask & ~self.fixed_mask
+        return self._mutable_numeric_mask
+
+    @property
+    def mutable_integer_mask(self) -> Tensor:
+        """Mask of integer columns that evolutionary operators may change."""
+
+        return self._mutable_integer_mask
 
     @property
     def mutable_categorical_mask(self) -> Tensor:
         """Mask of categorical columns that evolutionary operators may change."""
 
-        return self.categorical_mask & ~self.fixed_mask
+        return self._mutable_categorical_mask
 
 
 def repair_population(population: Tensor, spec: MixedVariableSpec) -> Tensor:
@@ -220,10 +249,16 @@ def repair_population(population: Tensor, spec: MixedVariableSpec) -> Tensor:
     if not bool(torch.isfinite(population).all()):
         raise ValueError("population contains non-finite values")
 
+    return _repair_population_unchecked(population, spec)
+
+
+def _repair_population_unchecked(population: Tensor, spec: MixedVariableSpec) -> Tensor:
+    """Repair an internally constructed population whose tensor contract is already known."""
+
     repaired = population.clamp(min=spec.lower, max=spec.upper)
 
-    integer_mask = spec.integer_mask & ~spec.fixed_mask
-    if bool(integer_mask.any()):
+    integer_mask = spec.mutable_integer_mask
+    if spec.has_integer:
         lower = spec.lower[integer_mask]
         upper = spec.upper[integer_mask]
         steps = spec.steps[integer_mask]
@@ -233,11 +268,11 @@ def repair_population(population: Tensor, spec: MixedVariableSpec) -> Tensor:
         coordinates = torch.minimum(coordinates, max_coordinates)
         repaired[:, integer_mask] = coordinates * steps + lower
 
-    categorical_mask = spec.categorical_mask & ~spec.fixed_mask
-    if bool(categorical_mask.any()):
+    categorical_mask = spec.mutable_categorical_mask
+    if spec.has_categorical:
         repaired[:, categorical_mask] = torch.round(repaired[:, categorical_mask])
 
     repaired = repaired.clamp(min=spec.lower, max=spec.upper)
-    if bool(spec.fixed_mask.any()):
+    if spec.has_fixed:
         repaired[:, spec.fixed_mask] = spec.fixed_values[spec.fixed_mask]
     return repaired

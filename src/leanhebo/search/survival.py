@@ -10,7 +10,11 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from leanhebo.search.sorting import crowding_distance, non_dominated_sort
+from leanhebo.search.sorting import (
+    _non_dominated_sort_unchecked,
+    _ranked_crowding,
+    _validate_objectives,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +36,22 @@ def select_survivors(objectives: Tensor, n_survive: int) -> SurvivalSelection:
     if n_survive > objectives.shape[0]:
         raise ValueError("n_survive cannot exceed the candidate-pool size")
 
-    ranks = non_dominated_sort(objectives)
-    crowding = crowding_distance(objectives, ranks)
+    _validate_objectives(objectives)
+    return _select_survivors_unchecked(objectives, n_survive)
+
+
+def _select_survivors_unchecked(objectives: Tensor, n_survive: int) -> SurvivalSelection:
+    """Select from an internally validated pool without ranking or crowding the unused tail."""
+
+    ranks, tail_rank = _non_dominated_sort_unchecked(objectives, stop_after=n_survive)
+    crowding = torch.zeros(
+        objectives.shape[0],
+        dtype=objectives.dtype,
+        device=objectives.device,
+    )
+    covered = torch.ones_like(ranks, dtype=torch.bool) if tail_rank is None else ranks != tail_rank
+    if n_survive:
+        crowding[covered] = _ranked_crowding(objectives[covered], ranks[covered])
     selected: list[Tensor] = []
     selected_count = 0
     for rank in torch.unique(ranks, sorted=True):

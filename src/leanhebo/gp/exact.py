@@ -48,7 +48,7 @@ class _MixedExactGP(gpytorch.models.ExactGP):  # type: ignore[misc]
     def forward(
         self, continuous: torch.Tensor, categorical: torch.Tensor
     ) -> gpytorch.distributions.MultivariateNormal:
-        features = self.feature_extractor(continuous, categorical)
+        features = self.feature_extractor._forward_unchecked(continuous, categorical)
         return gpytorch.distributions.MultivariateNormal(
             self.mean_module(features), self.covar_module(features)
         )
@@ -82,6 +82,11 @@ class ExactGPSurrogate:
         self.runtime = runtime
         self.device = torch.device(runtime.device)
         self.dtype = getattr(torch, runtime.dtype)
+        self._category_sizes_tensor = torch.tensor(
+            self.category_sizes,
+            device=self.device,
+            dtype=torch.int64,
+        )
         self.generator = generator
         self.diagnostics = diagnostics
         self.input_scaler: IdentityScaler | TorchMinMaxScaler
@@ -124,9 +129,13 @@ class ExactGPSurrogate:
             raise ValueError("continuous and categorical batch lengths differ")
         if not torch.isfinite(continuous).all():
             raise ValueError("continuous GP inputs must all be finite")
-        for index, size in enumerate(self.category_sizes):
-            if torch.any((categorical[:, index] < 0) | (categorical[:, index] >= size)):
-                raise ValueError(f"categorical codes in dimension {index} are out of bounds")
+        invalid_categories = (categorical < 0) | (
+            categorical >= self._category_sizes_tensor.unsqueeze(0)
+        )
+        invalid_dimensions = invalid_categories.any(dim=0)
+        if bool(invalid_dimensions.any()):
+            index = int(torch.nonzero(invalid_dimensions, as_tuple=False)[0, 0].item())
+            raise ValueError(f"categorical codes in dimension {index} are out of bounds")
         return continuous.contiguous(), categorical.contiguous()
 
     def _prepare_prediction_inputs(
@@ -351,24 +360,27 @@ class ExactGPSurrogate:
             for _ in range(requested_steps):
                 self.optimizer.zero_grad(set_to_none=True)
                 loss = self._training_loss(mll)
-                current_loss = float(loss.detach().cpu())
-                final_loss = current_loss
-                if not math.isfinite(current_loss):
-                    raise NumericalError("exact-GP fitting produced a non-finite loss")
-                if self.config.early_stopping and previous_loss is not None:
-                    denominator = max(abs(previous_loss), torch.finfo(self.dtype).eps)
-                    relative_change = abs(previous_loss - current_loss) / denominator
-                    stable_steps = (
-                        stable_steps + 1 if relative_change <= self.config.relative_tolerance else 0
-                    )
-                    if stable_steps >= self.config.patience:
-                        early_stopped = True
-                        break
+                if self.config.early_stopping or loss.device.type != "cuda":
+                    current_loss = float(loss.detach().cpu())
+                    final_loss = current_loss
+                    if not math.isfinite(current_loss):
+                        raise NumericalError("exact-GP fitting produced a non-finite loss")
+                    if self.config.early_stopping and previous_loss is not None:
+                        denominator = max(abs(previous_loss), torch.finfo(self.dtype).eps)
+                        relative_change = abs(previous_loss - current_loss) / denominator
+                        stable_steps = (
+                            stable_steps + 1
+                            if relative_change <= self.config.relative_tolerance
+                            else 0
+                        )
+                        if stable_steps >= self.config.patience:
+                            early_stopped = True
+                            break
+                    previous_loss = current_loss
                 loss.backward()  # type: ignore[no-untyped-call]
                 final_loss = None
                 self.optimizer.step()
                 completed += 1
-                previous_loss = current_loss
             if completed and not early_stopped:
                 final_loss = None
                 with torch.no_grad():
