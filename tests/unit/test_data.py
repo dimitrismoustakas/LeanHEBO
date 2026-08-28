@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 import torch
 
+from leanhebo.data import EncodedBatch
 from leanhebo.data.store import ObservationStore
+from leanhebo.errors import SpaceMismatchError
 from leanhebo.space import Bool, Categorical, Float, Integer, Space
 
 
@@ -68,3 +70,45 @@ def test_float_canonical_keys_normalize_signed_zero() -> None:
     assert compiled.canonical_keys(negative_zero) == compiled.canonical_keys(positive_zero)
     store.append(negative_zero, [1.0])
     assert store.unique_mask(positive_zero).tolist() == [False]
+
+
+def test_candidate_selection_keeps_encoded_and_decoded_rows_aligned() -> None:
+    compiled = Space(Integer("x", 0, 5), Categorical("c", ("a", "b"))).compile()
+    candidates = compiled.decode(
+        compiled.encode(
+            [
+                {"x": 0, "c": "a"},
+                {"x": 1, "c": "b"},
+                {"x": 2, "c": "a"},
+                {"x": 3, "c": "b"},
+            ]
+        )
+    )
+
+    for rows in (slice(1, None, 2), [3, 1], torch.tensor([True, False, True, False])):
+        selected = candidates.select(rows)
+        expected = candidates.encoded.select(rows)
+
+        assert torch.equal(selected.continuous, expected.continuous)
+        assert torch.equal(selected.categorical, expected.categorical)
+        assert selected.to_records() == compiled.decode(expected).to_records()
+
+
+def test_store_membership_owns_space_and_encoded_validation() -> None:
+    compiled = Space(Integer("x", 0, 5)).compile()
+    store = ObservationStore(compiled)
+    foreign = Space(Integer("other", 0, 5)).compile().sample(1, seed=3)
+    malformed = EncodedBatch(
+        torch.empty((0, 0)),
+        torch.empty((0, 0), dtype=torch.int64),
+    )
+
+    with pytest.raises(SpaceMismatchError):
+        store.unique_mask(foreign)
+    with pytest.raises(SpaceMismatchError):
+        store.append(foreign, [1.0])
+    with pytest.raises(ValueError, match="expected 1 continuous columns"):
+        store.unique_mask(malformed)
+    with pytest.raises(ValueError, match="expected 1 continuous columns"):
+        store.append(malformed, [])
+    assert len(store) == 0

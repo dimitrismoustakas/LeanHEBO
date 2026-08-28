@@ -28,6 +28,22 @@ def _validate_tensors(continuous: torch.Tensor, categorical: torch.Tensor) -> No
         raise ValueError("encoded tensors must be on the same device")
 
 
+def _normalize_rows(
+    rows: torch.Tensor | slice | Sequence[int],
+    *,
+    count: int,
+    device: torch.device,
+) -> torch.Tensor | slice:
+    if isinstance(rows, slice):
+        return rows
+    index = torch.as_tensor(rows, device=device)
+    if index.dtype == torch.bool:
+        if index.ndim != 1 or index.numel() != count:
+            raise ValueError("a Boolean row mask must have one entry per batch row")
+        return index
+    return index.to(torch.int64).reshape(-1)
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class EncodedBatch:
     """The native mixed-space representation.
@@ -88,20 +104,13 @@ class EncodedBatch:
     def select(self, rows: torch.Tensor | slice | Sequence[int]) -> EncodedBatch:
         """Select rows while retaining the two-dimensional batch shape."""
 
-        if isinstance(rows, slice):
-            continuous = self.continuous[rows]
-            categorical = self.categorical[rows]
+        index = _normalize_rows(rows, count=len(self), device=self.device)
+        if isinstance(index, slice) or index.dtype == torch.bool:
+            continuous = self.continuous[index]
+            categorical = self.categorical[index]
         else:
-            index = torch.as_tensor(rows, device=self.device)
-            if index.dtype == torch.bool:
-                if index.ndim != 1 or index.numel() != len(self):
-                    raise ValueError("a Boolean row mask must have one entry per batch row")
-                continuous = self.continuous[index]
-                categorical = self.categorical[index]
-            else:
-                index = index.to(torch.int64).reshape(-1)
-                continuous = self.continuous.index_select(0, index)
-                categorical = self.categorical.index_select(0, index)
+            continuous = self.continuous.index_select(0, index)
+            categorical = self.categorical.index_select(0, index)
         return EncodedBatch(continuous, categorical)
 
     def to_dense(self) -> torch.Tensor:
@@ -185,28 +194,30 @@ class CandidateBatch:
         )
 
     def select(self, rows: torch.Tensor | slice | Sequence[int]) -> CandidateBatch:
-        encoded = self.encoded.select(rows)
-        if isinstance(rows, slice):
-            indices = tuple(range(len(self)))[rows]
+        index = _normalize_rows(rows, count=len(self), device=self.device)
+        if isinstance(index, slice) or index.dtype == torch.bool:
+            continuous = self.continuous[index]
+            categorical = self.categorical[index]
+            activity = None if self.activity is None else self.activity[index]
         else:
-            tensor_rows = torch.as_tensor(rows)
-            if tensor_rows.dtype == torch.bool:
-                indices = tuple(tensor_rows.nonzero(as_tuple=False).flatten().tolist())
-            else:
-                indices = tuple(int(index) for index in tensor_rows.reshape(-1).tolist())
+            continuous = self.continuous.index_select(0, index)
+            categorical = self.categorical.index_select(0, index)
+            activity = None if self.activity is None else self.activity.index_select(0, index)
         columns = None
         if self.decoded_columns is not None:
+            if isinstance(index, slice):
+                indices = tuple(range(len(self)))[index]
+            elif index.dtype == torch.bool:
+                indices = tuple(index.nonzero(as_tuple=False).flatten().cpu().tolist())
+            else:
+                indices = tuple(index.cpu().tolist())
             columns = {
                 name: tuple(values[index] for index in indices)
                 for name, values in self.decoded_columns.items()
             }
-        activity = None
-        if self.activity is not None:
-            index = torch.tensor(indices, dtype=torch.int64, device=self.activity.device)
-            activity = self.activity.index_select(0, index)
         return CandidateBatch(
-            encoded.continuous,
-            encoded.categorical,
+            continuous,
+            categorical,
             self.space_fingerprint,
             columns,
             activity,

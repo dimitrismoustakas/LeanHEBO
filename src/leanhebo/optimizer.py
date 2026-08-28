@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from itertools import islice
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import Any, Self
 
 import torch
 
@@ -23,13 +23,12 @@ from leanhebo.diagnostics import Diagnostics, FitReport
 from leanhebo.errors import CheckpointError, SearchSpaceExhaustedError
 from leanhebo.gp import ConditionalExactGPSurrogate, ExactGPSurrogate
 from leanhebo.runtime.rng import RandomStreams
-from leanhebo.search import (
+from leanhebo.search.conditional import (
     ConditionalTorchNSGA2,
-    MixedVariableSpec,
-    NSGA2Result,
-    TorchNSGA2,
     eliminate_semantic_duplicates,
 )
+from leanhebo.search.nsga2 import NSGA2Result, TorchNSGA2
+from leanhebo.search.repair import MixedVariableSpec
 from leanhebo.space import (
     Bool,
     Categorical,
@@ -123,10 +122,8 @@ class LeanHEBO:
             raise ValueError(f"CUDA device {self.device} was requested but CUDA is unavailable")
         self.dtype: torch.dtype = getattr(torch, self.config.runtime.dtype)
         if isinstance(space, Space):
-            self.public_space = space
             self.space = space.compile(dtype=self.dtype)
         else:
-            self.public_space = Space(*space.parameters)
             self.space = (
                 space
                 if space.dtype == self.dtype
@@ -138,7 +135,7 @@ class LeanHEBO:
             device=self.device,
             nonfinite=self.config.nonfinite_policy,
         )
-        self.output_transform = OutputTransform(cast(Any, self.config.warp)).to(
+        self.output_transform = OutputTransform(self.config.warp).to(
             device=self.device, dtype=self.dtype
         )
         self.random = RandomStreams.create(
@@ -153,9 +150,7 @@ class LeanHEBO:
         self._force_full_refit = False
         self._previous_population: torch.Tensor | None = None
         self._last_search: NSGA2Result | None = None
-        self._base_search_spec = (
-            self._search_spec(None) if self.space.dense_dimension else None
-        )
+        self._base_search_spec = self._search_spec(None) if self.space.dense_dimension else None
 
     @property
     def random_samples(self) -> int:
@@ -730,7 +725,7 @@ class LeanHEBO:
         observations = self.store._materialize_view()
         return {
             "config": self.config.to_dict(),
-            "space": self.public_space.to_spec(),
+            "space": self.space.to_spec(),
             "observations": {
                 "continuous": observations.continuous.detach().cpu(),
                 "categorical": observations.categorical.detach().cpu(),

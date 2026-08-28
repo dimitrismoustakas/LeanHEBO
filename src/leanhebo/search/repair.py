@@ -56,7 +56,6 @@ class MixedVariableSpec:
     steps: Tensor
     fixed_mask: Tensor
     fixed_values: Tensor
-    numeric_mask: Tensor = field(init=False, repr=False, compare=False)
     mutable_numeric_mask: Tensor = field(init=False, repr=False, compare=False)
     mutable_integer_mask: Tensor = field(init=False, repr=False, compare=False)
     mutable_categorical_mask: Tensor = field(init=False, repr=False, compare=False)
@@ -191,7 +190,6 @@ class MixedVariableSpec:
         mutable_numeric_mask = ~categorical_mask & mutable_mask
         mutable_integer_mask = integer_mask & mutable_mask
         mutable_categorical_mask = categorical_mask & mutable_mask
-        object.__setattr__(self, "numeric_mask", ~categorical_mask)
         object.__setattr__(self, "mutable_numeric_mask", mutable_numeric_mask)
         object.__setattr__(self, "mutable_integer_mask", mutable_integer_mask)
         object.__setattr__(self, "mutable_categorical_mask", mutable_categorical_mask)

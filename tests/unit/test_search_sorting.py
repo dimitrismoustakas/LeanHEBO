@@ -4,12 +4,8 @@
 import torch
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 
-from leanhebo.search import (
-    crowding_distance,
-    dominance_matrix,
-    non_dominated_sort,
-    select_survivors,
-)
+from leanhebo.search.sorting import crowding_distance, dominance_matrix, non_dominated_sort
+from leanhebo.search.survival import select_survivors
 
 
 def test_non_dominated_sort_assigns_expected_fronts() -> None:

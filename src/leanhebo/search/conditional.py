@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Protocol
 
 import torch
@@ -14,7 +13,6 @@ from torch import Tensor
 from leanhebo.search.conditional_operators import conditional_mutation
 from leanhebo.search.duplicates import _exact_duplicate_mask
 from leanhebo.search.nsga2 import TorchNSGA2, _SobolPopulationSampler
-from leanhebo.search.operators import binary_tournament, mixed_variable_crossover
 from leanhebo.search.repair import MixedVariableSpec, repair_population
 
 
@@ -121,26 +119,22 @@ class ConditionalTorchNSGA2(TorchNSGA2):
         population_size: int = 100,
         generations: int = 100,
         crossover_probability: float = 0.9,
-        crossover_dimension_probability: float = 0.5,
         crossover_eta: float = 15.0,
         mutation_probability: float | None = None,
         mutation_eta: float = 20.0,
         tournament_size: int = 2,
         eliminate_duplicate_points: bool = True,
-        max_duplicate_retries: int = 4,
     ) -> None:
         super().__init__(
             space,
             population_size=population_size,
             generations=generations,
             crossover_probability=crossover_probability,
-            crossover_dimension_probability=crossover_dimension_probability,
             crossover_eta=crossover_eta,
             mutation_probability=mutation_probability,
             mutation_eta=mutation_eta,
             tournament_size=tournament_size,
             eliminate_duplicate_points=eliminate_duplicate_points,
-            max_duplicate_retries=max_duplicate_retries,
         )
         self.semantics = semantics
 
@@ -178,8 +172,9 @@ class ConditionalTorchNSGA2(TorchNSGA2):
             population_keys = seeded_keys[: self.population_size]
         population = seeded[: self.population_size]
 
-        attempts = 0
-        while population.shape[0] < self.population_size:
+        for _ in range(self._DUPLICATE_ATTEMPTS):
+            if population.shape[0] >= self.population_size:
+                break
             remaining = self.population_size - population.shape[0]
             draw_count = remaining if not self.eliminate_duplicate_points else max(remaining * 2, 4)
             candidates = sampler.draw(draw_count)
@@ -200,9 +195,6 @@ class ConditionalTorchNSGA2(TorchNSGA2):
                         (population_keys, candidate_keys[:take]),
                         dim=0,
                     )
-            attempts += 1
-            if attempts > self.max_duplicate_retries and population.shape[0] < self.population_size:
-                break
 
         if self.eliminate_duplicate_points and population.shape[0] < self.population_size:
             completion = self._completion(
@@ -214,37 +206,14 @@ class ConditionalTorchNSGA2(TorchNSGA2):
             raise RuntimeError("failed to initialize a non-empty population")
         return population
 
-    def _offspring_batch(
+    def _mutate(
         self,
         population: Tensor,
-        ranks: Tensor,
-        crowding: Tensor,
         spec: MixedVariableSpec,
-        count: int,
         generator: torch.Generator | None,
     ) -> Tensor:
-        pair_count = math.ceil(count / 2)
-        parent_indices = binary_tournament(
-            ranks,
-            crowding,
-            pair_count * 2,
-            generator=generator,
-            tournament_size=self.tournament_size,
-        )
-        parent_a = population[parent_indices[0::2]]
-        parent_b = population[parent_indices[1::2]]
-        child_a, child_b = mixed_variable_crossover(
-            parent_a,
-            parent_b,
-            spec,
-            probability=self.crossover_probability,
-            dimension_probability=self.crossover_dimension_probability,
-            eta=self.crossover_eta,
-            generator=generator,
-        )
-        children = torch.stack((child_a, child_b), dim=1).reshape(-1, spec.dimension)[:count]
         return conditional_mutation(
-            children,
+            population,
             spec,
             self.semantics,
             probability=self.mutation_probability,
@@ -275,7 +244,7 @@ class ConditionalTorchNSGA2(TorchNSGA2):
         offspring = population.new_empty((0, spec.dimension))
         population_keys = _semantic_keys(population, self.semantics)
         offspring_keys = population_keys.new_empty((0, population_keys.shape[1]))
-        for _ in range(self.max_duplicate_retries + 1):
+        for _ in range(self._DUPLICATE_ATTEMPTS):
             remaining = target - offspring.shape[0]
             if remaining <= 0:
                 break

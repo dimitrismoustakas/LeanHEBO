@@ -213,7 +213,6 @@ class ActivityFactorizedProductKernel(gpytorch.kernels.Kernel):  # type: ignore[
             offset += block.output_dimensions
         self._group_slices = tuple(group_slices)
         self._activity_slice = slice(offset, offset + len(layout.groups))
-        self.packed_dimensions = self._activity_slice.stop
 
     @property
     def batch_shape(self) -> torch.Size:

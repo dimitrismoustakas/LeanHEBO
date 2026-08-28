@@ -3,16 +3,15 @@
 
 import torch
 
-from leanhebo.search import (
-    MixedVariableSpec,
+from leanhebo.search.duplicates import duplicate_mask
+from leanhebo.search.operators import (
     binary_tournament,
     categorical_mutation,
-    duplicate_mask,
     mixed_variable_crossover,
     mutate_population,
-    repair_population,
     sbx_crossover,
 )
+from leanhebo.search.repair import MixedVariableSpec, repair_population
 
 
 def _mixed_spec() -> MixedVariableSpec:

@@ -7,14 +7,14 @@ import pytest
 import torch
 
 import leanhebo.search.nsga2 as nsga2_module
-from leanhebo.search import (
+from leanhebo.search.conditional import (
     ConditionalTorchNSGA2,
-    MixedVariableSpec,
-    conditional_mutation,
     eliminate_semantic_duplicates,
-    mixed_variable_crossover,
     semantic_duplicate_mask,
 )
+from leanhebo.search.conditional_operators import conditional_mutation
+from leanhebo.search.operators import mixed_variable_crossover
+from leanhebo.search.repair import MixedVariableSpec
 
 
 class _BranchSemantics:
@@ -176,7 +176,6 @@ def test_contextual_finite_completion_returns_every_available_semantic_row(
         semantics,
         population_size=3,
         generations=0,
-        max_duplicate_retries=0,
     )
     sampler = nsga2_module._SobolPopulationSampler(spec, None)
     repeated = torch.tensor([[1.0, 0.0]])
@@ -206,7 +205,6 @@ def test_conditional_nsga_stops_at_semantic_space_exhaustion() -> None:
         semantics,
         population_size=8,
         generations=3,
-        max_duplicate_retries=0,
     ).minimize(
         lambda population: semantics.semantic_keys(population).sum(dim=1),
         generator=torch.Generator().manual_seed(31),

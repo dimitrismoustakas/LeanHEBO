@@ -29,14 +29,13 @@ class CanonicalKeySet:
     def unique_mask(self, value: EncodedBatch | CandidateBatch) -> torch.Tensor:
         """Mark rows absent from history and earlier positions in this batch."""
 
-        encoded = self._encoded(value)
         seen: set[CanonicalKey] = set()
         result: list[bool] = []
-        for key in self.space.canonical_keys(encoded):
+        for key in self.space.canonical_keys(value):
             unseen = key not in self._keys and key not in seen
             result.append(unseen)
             seen.add(key)
-        return torch.tensor(result, dtype=torch.bool, device=encoded.device)
+        return torch.tensor(result, dtype=torch.bool, device=value.device)
 
     def clear(self) -> None:
         self._keys.clear()
@@ -45,12 +44,3 @@ class CanonicalKeySet:
         """Return a stable primitive snapshot suitable for checkpointing."""
 
         return tuple(sorted(self._keys))
-
-    def _encoded(self, value: EncodedBatch | CandidateBatch) -> EncodedBatch:
-        if isinstance(value, CandidateBatch):
-            self.space._validate_fingerprint(value.space_fingerprint)
-            encoded = value.encoded
-        else:
-            encoded = value
-        self.space.validate_encoded(encoded)
-        return encoded

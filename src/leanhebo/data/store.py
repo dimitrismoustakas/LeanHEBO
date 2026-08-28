@@ -86,10 +86,8 @@ class ObservationStore:
 
         if isinstance(x, CandidateBatch):
             self.space._validate_fingerprint(x.space_fingerprint)
-            self.space.validate_encoded(x.encoded)
             encoded = x.encoded  # direct path: no adapter or parameter codec call
         elif isinstance(x, EncodedBatch):
-            self.space.validate_encoded(x)
             encoded = x
         else:
             encoded = self.space.encode(x)
@@ -105,12 +103,12 @@ class ObservationStore:
         if invalid_count:
             encoded = encoded.select(finite)
             outcomes = outcomes[finite]
-            self.discarded_count += invalid_count
+        self._keys.add(encoded)
+        self.discarded_count += invalid_count
         if len(encoded) == 0:
             return 0
         self._x_chunks.append(encoded)
         self._y_chunks.append(outcomes.detach().clone())
-        self._keys.add(encoded)
         self.observation_version += 1
         self._cache = None
         return len(encoded)
@@ -144,13 +142,7 @@ class ObservationStore:
         return self._keys.snapshot()
 
     def unique_mask(self, value: CandidateBatch | EncodedBatch) -> torch.Tensor:
-        if isinstance(value, CandidateBatch):
-            self.space._validate_fingerprint(value.space_fingerprint)
-            encoded = value.encoded
-        else:
-            encoded = value
-        self.space.validate_encoded(encoded)
-        return self._keys.unique_mask(encoded)
+        return self._keys.unique_mask(value)
 
     def _materialize_view(self) -> ObservationBatch:
         """Return the cached internal view; callers must not expose or mutate it."""

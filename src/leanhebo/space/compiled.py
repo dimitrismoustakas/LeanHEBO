@@ -537,9 +537,13 @@ class CompiledSpace:
                 semantic,
                 dtype=column.dtype,
             ).clamp(continuous_lower[index], continuous_upper[index])
-        categorical_values = dense[:, self.n_continuous :].round().clamp(
-            min=lower[self.n_continuous :],
-            max=upper[self.n_continuous :],
+        categorical_values = (
+            dense[:, self.n_continuous :]
+            .round()
+            .clamp(
+                min=lower[self.n_continuous :],
+                max=upper[self.n_continuous :],
+            )
         )
         encoded = EncodedBatch(continuous, categorical_values.to(dtype=torch.int64))
         return self.apply_fixed(encoded, fixed) if fixed is not None else encoded

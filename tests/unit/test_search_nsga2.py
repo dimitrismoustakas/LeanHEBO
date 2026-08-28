@@ -5,13 +5,10 @@ import pytest
 import torch
 
 import leanhebo.search.nsga2 as nsga2_module
-from leanhebo.search import (
-    MixedVariableSpec,
-    TorchNSGA2,
-    crowding_distance,
-    duplicate_mask,
-    repair_population,
-)
+from leanhebo.search.duplicates import duplicate_mask
+from leanhebo.search.nsga2 import TorchNSGA2
+from leanhebo.search.repair import MixedVariableSpec, repair_population
+from leanhebo.search.sorting import crowding_distance
 
 
 def _biobjective(values: torch.Tensor) -> torch.Tensor:
@@ -151,7 +148,7 @@ def test_saturated_discrete_space_returns_all_available_unique_points() -> None:
         upper=torch.tensor([1.0]),
         categorical_mask=torch.tensor([True]),
     )
-    optimizer = TorchNSGA2(spec, population_size=10, generations=3, max_duplicate_retries=1)
+    optimizer = TorchNSGA2(spec, population_size=10, generations=3)
 
     result = optimizer.minimize(
         lambda population: population.square(),
@@ -184,7 +181,6 @@ def test_discrete_initialization_completes_after_repeated_sobol_duplicates(
         spec,
         population_size=10,
         generations=0,
-        max_duplicate_retries=0,
     ).minimize(lambda population: population.sum(dim=1))
 
     assert result.population.shape == (10, 2)
@@ -199,7 +195,7 @@ def test_discrete_offspring_completion_uses_unseen_lattice_points(
         upper=torch.full((2,), 3.0),
         categorical_mask=torch.ones(2, dtype=torch.bool),
     )
-    optimizer = TorchNSGA2(spec, population_size=4, max_duplicate_retries=0)
+    optimizer = TorchNSGA2(spec, population_size=4)
     population = torch.tensor([[0.0, 0.0], [0.0, 1.0], [0.0, 2.0], [0.0, 3.0]])
 
     def repeated_parent(

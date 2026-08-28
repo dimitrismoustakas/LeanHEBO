@@ -223,7 +223,6 @@ class ConditionalExactGPSurrogate(ExactGPSurrogate):
         semantics = space.conditional_semantics
         if semantics is None:
             raise ValueError("ConditionalExactGPSurrogate requires a conditional compiled space")
-        self.space = space
         self.semantics = semantics
         self.layout = _layout_from_semantics(semantics)
         category_sizes = tuple(

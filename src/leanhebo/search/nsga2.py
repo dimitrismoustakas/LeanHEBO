@@ -178,6 +178,9 @@ class TorchNSGA2:
     evolutionary loop.
     """
 
+    _CROSSOVER_DIMENSION_PROBABILITY = 0.5
+    _DUPLICATE_ATTEMPTS = 5
+
     def __init__(
         self,
         space: MixedVariableSpec,
@@ -185,13 +188,11 @@ class TorchNSGA2:
         population_size: int = 100,
         generations: int = 100,
         crossover_probability: float = 0.9,
-        crossover_dimension_probability: float = 0.5,
         crossover_eta: float = 15.0,
         mutation_probability: float | None = None,
         mutation_eta: float = 20.0,
         tournament_size: int = 2,
         eliminate_duplicate_points: bool = True,
-        max_duplicate_retries: int = 4,
     ) -> None:
         """Configure search work and operators."""
         if (
@@ -202,12 +203,8 @@ class TorchNSGA2:
             raise ValueError("population_size must be positive")
         if isinstance(generations, bool) or not isinstance(generations, int) or generations < 0:
             raise ValueError("generations must be non-negative")
-        for name, value in (
-            ("crossover_probability", crossover_probability),
-            ("crossover_dimension_probability", crossover_dimension_probability),
-        ):
-            if not math.isfinite(value) or not 0 <= value <= 1:
-                raise ValueError(f"{name} must lie in [0, 1]")
+        if not math.isfinite(crossover_probability) or not 0 <= crossover_probability <= 1:
+            raise ValueError("crossover_probability must lie in [0, 1]")
         if mutation_probability is not None and (
             not math.isfinite(mutation_probability) or not 0 <= mutation_probability <= 1
         ):
@@ -222,24 +219,15 @@ class TorchNSGA2:
             or tournament_size < 2
         ):
             raise ValueError("tournament_size must be at least two")
-        if (
-            isinstance(max_duplicate_retries, bool)
-            or not isinstance(max_duplicate_retries, int)
-            or max_duplicate_retries < 0
-        ):
-            raise ValueError("max_duplicate_retries must be non-negative")
-
         self._spec = space
         self.population_size = population_size
         self.generations = generations
         self.crossover_probability = crossover_probability
-        self.crossover_dimension_probability = crossover_dimension_probability
         self.crossover_eta = crossover_eta
         self.mutation_probability = mutation_probability
         self.mutation_eta = mutation_eta
         self.tournament_size = tournament_size
         self.eliminate_duplicate_points = eliminate_duplicate_points
-        self.max_duplicate_retries = max_duplicate_retries
 
     @staticmethod
     def _as_seed_population(
@@ -280,8 +268,9 @@ class TorchNSGA2:
             seeded = seeded[~_exact_duplicate_mask(seeded)]
         population = seeded[: self.population_size]
 
-        attempts = 0
-        while population.shape[0] < self.population_size:
+        for _ in range(self._DUPLICATE_ATTEMPTS):
+            if population.shape[0] >= self.population_size:
+                break
             remaining = self.population_size - population.shape[0]
             draw_count = remaining if not self.eliminate_duplicate_points else max(remaining * 2, 4)
             candidates = sampler.draw(draw_count)
@@ -290,9 +279,6 @@ class TorchNSGA2:
             take = min(remaining, candidates.shape[0])
             if take:
                 population = torch.cat((population, candidates[:take]), dim=0)
-            attempts += 1
-            if attempts > self.max_duplicate_retries and population.shape[0] < self.population_size:
-                break
         if self.eliminate_duplicate_points and population.shape[0] < self.population_size:
             completion = _discrete_lattice_completion(
                 spec,
@@ -331,6 +317,20 @@ class TorchNSGA2:
             raise ValueError("objective returned non-finite values")
         return values.detach()
 
+    def _mutate(
+        self,
+        population: Tensor,
+        spec: MixedVariableSpec,
+        generator: torch.Generator | None,
+    ) -> Tensor:
+        return mutate_population(
+            population,
+            spec,
+            probability=self.mutation_probability,
+            eta=self.mutation_eta,
+            generator=generator,
+        )
+
     def _offspring_batch(
         self,
         population: Tensor,
@@ -355,18 +355,12 @@ class TorchNSGA2:
             parent_b,
             spec,
             probability=self.crossover_probability,
-            dimension_probability=self.crossover_dimension_probability,
+            dimension_probability=self._CROSSOVER_DIMENSION_PROBABILITY,
             eta=self.crossover_eta,
             generator=generator,
         )
         children = torch.stack((child_a, child_b), dim=1).reshape(-1, spec.dimension)[:count]
-        return mutate_population(
-            children,
-            spec,
-            probability=self.mutation_probability,
-            eta=self.mutation_eta,
-            generator=generator,
-        )
+        return self._mutate(children, spec, generator)
 
     def _make_offspring(
         self,
@@ -389,7 +383,7 @@ class TorchNSGA2:
             )
 
         offspring = population.new_empty((0, spec.dimension))
-        for _ in range(self.max_duplicate_retries + 1):
+        for _ in range(self._DUPLICATE_ATTEMPTS):
             remaining = target - offspring.shape[0]
             if remaining <= 0:
                 break
