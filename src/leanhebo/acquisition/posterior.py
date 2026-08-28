@@ -12,7 +12,11 @@ import torch
 
 class PosteriorProvider(Protocol):
     def predict(
-        self, continuous: torch.Tensor, categorical: torch.Tensor
+        self,
+        continuous: torch.Tensor,
+        categorical: torch.Tensor,
+        *,
+        validate: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 
@@ -32,11 +36,13 @@ class PosteriorEvaluator:
         provider: PosteriorProvider,
         *,
         batch_size: int | None = 4096,
+        validate: bool = True,
     ) -> None:
         if batch_size is not None and batch_size < 1:
             raise ValueError("batch_size must be positive or None")
         self.provider = provider
         self.batch_size = batch_size
+        self.validate = validate
 
     def evaluate(self, continuous: torch.Tensor, categorical: torch.Tensor) -> PosteriorStats:
         if continuous.shape[0] != categorical.shape[0]:
@@ -51,9 +57,19 @@ class PosteriorEvaluator:
         noise: torch.Tensor | None = None
         for start in range(0, count, chunk_size):
             end = min(start + chunk_size, count)
-            mean, variance, chunk_noise = self.provider.predict(
-                continuous[start:end], categorical[start:end]
-            )
+            chunk_continuous = continuous[start:end]
+            chunk_categorical = categorical[start:end]
+            if self.validate:
+                mean, variance, chunk_noise = self.provider.predict(
+                    chunk_continuous,
+                    chunk_categorical,
+                )
+            else:
+                mean, variance, chunk_noise = self.provider.predict(
+                    chunk_continuous,
+                    chunk_categorical,
+                    validate=False,
+                )
             means.append(mean)
             variances.append(variance)
             noise = chunk_noise if noise is None else noise

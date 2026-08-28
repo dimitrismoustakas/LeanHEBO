@@ -25,6 +25,7 @@ class MACEEvaluator:
         epsilon: float = 1e-4,
         stochastic: bool = True,
         generator: torch.Generator | None = None,
+        validate: bool = True,
     ) -> None:
         if kappa < 0:
             raise ValueError("kappa cannot be negative")
@@ -36,6 +37,7 @@ class MACEEvaluator:
         self.epsilon = epsilon
         self.stochastic = stochastic
         self.generator = generator
+        self.validate = validate
 
     def evaluate(self, continuous: torch.Tensor, categorical: torch.Tensor) -> torch.Tensor:
         return self.from_stats(self.posterior.evaluate(continuous, categorical))
@@ -81,7 +83,7 @@ class MACEEvaluator:
         negative_log_ei = -torch.where(direct, log_ei, log_ei_approx)
         negative_log_pi = -torch.where(direct, log_pi, log_pi_approx)
         objectives = torch.stack((lcb, negative_log_ei, negative_log_pi), dim=-1)
-        if not torch.isfinite(objectives).all():
+        if self.validate and not torch.isfinite(objectives).all():
             bad = int((~torch.isfinite(objectives)).sum().item())
             raise NumericalError(f"MACE produced {bad} non-finite objective values")
         return objectives

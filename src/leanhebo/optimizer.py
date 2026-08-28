@@ -291,12 +291,17 @@ class LeanHEBO:
         incumbent_stats = posterior.evaluate(incumbent.continuous, incumbent.categorical)
         kappa = self._kappa(n_suggestions)
         mace = MACEEvaluator(
-            posterior,
+            PosteriorEvaluator(
+                self._surrogate,
+                batch_size=self.config.runtime.acquisition_batch_size,
+                validate=False,
+            ),
             best_y=incumbent_stats.mean[0],
             kappa=kappa,
             epsilon=self.config.acquisition.epsilon,
             stochastic=self.config.acquisition.stochastic,
             generator=self.random.acquisition,
+            validate=False,
         )
 
         search_fixed = fixed.to(self.device, dtype=self.dtype) if fixed is not None else None

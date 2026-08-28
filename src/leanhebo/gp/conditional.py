@@ -293,9 +293,17 @@ class ConditionalExactGPSurrogate(ExactGPSurrogate):
         return (*super()._train_inputs(), self.train_activity)
 
     def _prepare_prediction_inputs(
-        self, continuous: torch.Tensor, categorical: torch.Tensor
+        self,
+        continuous: torch.Tensor,
+        categorical: torch.Tensor,
+        *,
+        validate: bool = True,
     ) -> tuple[torch.Tensor, ...]:
-        continuous, categorical = self._coerce_inputs(continuous, categorical)
+        continuous, categorical = self._coerce_inputs(
+            continuous,
+            categorical,
+            validate=validate,
+        )
         activity = self._derive_activity(continuous, categorical)
         continuous = self.masked_input_scaler.transform(continuous, activity).contiguous()
         return continuous, categorical, activity

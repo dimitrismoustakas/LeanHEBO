@@ -117,7 +117,11 @@ class ExactGPSurrogate:
         return noise
 
     def _coerce_inputs(
-        self, continuous: torch.Tensor, categorical: torch.Tensor
+        self,
+        continuous: torch.Tensor,
+        categorical: torch.Tensor,
+        *,
+        validate: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         continuous = torch.as_tensor(continuous, device=self.device, dtype=self.dtype)
         categorical = torch.as_tensor(categorical, device=self.device, dtype=torch.int64)
@@ -127,16 +131,25 @@ class ExactGPSurrogate:
             raise ValueError("categorical input shape is incompatible with the surrogate")
         if continuous.shape[0] != categorical.shape[0]:
             raise ValueError("continuous and categorical batch lengths differ")
-        if not torch.isfinite(continuous).all():
-            raise ValueError("continuous GP inputs must all be finite")
-        if bool(((categorical < 0) | (categorical >= self._category_sizes_tensor)).any()):
-            raise ValueError("categorical codes are out of bounds")
+        if validate:
+            if not torch.isfinite(continuous).all():
+                raise ValueError("continuous GP inputs must all be finite")
+            if bool(((categorical < 0) | (categorical >= self._category_sizes_tensor)).any()):
+                raise ValueError("categorical codes are out of bounds")
         return continuous.contiguous(), categorical.contiguous()
 
     def _prepare_prediction_inputs(
-        self, continuous: torch.Tensor, categorical: torch.Tensor
+        self,
+        continuous: torch.Tensor,
+        categorical: torch.Tensor,
+        *,
+        validate: bool = True,
     ) -> tuple[torch.Tensor, ...]:
-        continuous, categorical = self._coerce_inputs(continuous, categorical)
+        continuous, categorical = self._coerce_inputs(
+            continuous,
+            categorical,
+            validate=validate,
+        )
         if self.num_continuous and not self.input_scaler.fitted:
             raise RuntimeError("the GP input scaler has not been fitted")
         return self.input_scaler.transform(continuous).contiguous(), categorical
@@ -425,13 +438,21 @@ class ExactGPSurrogate:
 
     @torch.no_grad()
     def predict(
-        self, continuous: torch.Tensor, categorical: torch.Tensor
+        self,
+        continuous: torch.Tensor,
+        categorical: torch.Tensor,
+        *,
+        validate: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return mean, variance, and scalar observation-noise variance."""
 
         if self.model is None or self.likelihood is None:
             raise RuntimeError("the GP has not been fitted")
-        inputs = self._prepare_prediction_inputs(continuous, categorical)
+        inputs = self._prepare_prediction_inputs(
+            continuous,
+            categorical,
+            validate=validate,
+        )
         if self.model.training:
             self.model.eval()
         if self.likelihood.training:
@@ -452,7 +473,7 @@ class ExactGPSurrogate:
                 distribution = self.likelihood(distribution)
         mean = distribution.mean.reshape(-1)
         variance = distribution.variance.reshape(-1).clamp_min(torch.finfo(self.dtype).eps)
-        if not torch.isfinite(mean).all() or not torch.isfinite(variance).all():
+        if validate and (not torch.isfinite(mean).all() or not torch.isfinite(variance).all()):
             raise NumericalError("exact-GP posterior contains non-finite values")
         return mean, variance, self.noise_variance
 
