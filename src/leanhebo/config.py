@@ -19,7 +19,7 @@ class RuntimeConfig:
     dtype: Literal["float32", "float64"] = "float32"
     seed: int | None = None
     acquisition_batch_size: int | None = 4096
-    synchronize_device_for_timing: bool = True
+    synchronize_device_for_timing: bool = False
 
     def __post_init__(self) -> None:
         if not self.device:
