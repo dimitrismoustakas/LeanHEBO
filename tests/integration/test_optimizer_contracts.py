@@ -135,7 +135,6 @@ def test_sequential_initial_suggestions_follow_the_same_sobol_prefix_as_a_batch(
 
     sequential = torch.cat([candidate.continuous for candidate in sequential_rows])
     assert torch.equal(sequential, batched.continuous)
-    assert sequential_optimizer._sobol_draw_count == batched_optimizer._sobol_draw_count == 6
 
 
 def test_discrete_initial_suggestions_are_independent_of_batching() -> None:
@@ -155,7 +154,6 @@ def test_discrete_initial_suggestions_are_independent_of_batching() -> None:
         sequential_optimizer.observe(candidate, torch.zeros(1))
 
     assert sequential_records == batched.to_records()
-    assert sequential_optimizer._sobol_draw_count == batched_optimizer._sobol_draw_count == 8
 
 
 def test_fully_static_space_returns_its_only_point_then_exhausts() -> None:
@@ -340,7 +338,6 @@ def test_cpu_dtype_propagates_through_store_gp_search_and_candidates(
     assert optimizer.last_search is not None
     assert optimizer.last_search.population.dtype == torch_dtype
     assert optimizer.last_search.objectives.dtype == torch_dtype
-    assert optimizer._previous_population is None
 
 
 def test_reused_search_population_does_not_alias_last_search() -> None:

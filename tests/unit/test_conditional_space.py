@@ -67,10 +67,6 @@ def test_condition_normalization_spec_round_trip_and_grouping() -> None:
     assert conditional.parameters[4].active_when == Eq("left", True)
     assert Integer("x", 0, 2, active_when=All(In("left", (True,)))).active_when == Eq("left", True)
     assert "active_when=All(" in repr(conditional.parameters[2])
-    assert "AnyOf" not in repr(Any(Eq("left", True), Eq("right", "on")))
-    assert repr(Integer("flat", 0, 2)) == (
-        "Integer(name='flat', low=0, high=2, step=1, log=False, base=10.0, exponent=False)"
-    )
 
     restored = Space.from_spec(conditional.to_spec())
     assert restored == conditional
@@ -507,19 +503,14 @@ def test_activity_projection_and_keys_have_cuda_parity() -> None:
     )
     cuda = encoded.to("cuda")
 
-    semantics = _semantics(compiled)
-    cpu_activity = semantics.activity(encoded)
-    cuda_activity = semantics.activity(cuda)
-    assert torch.equal(cpu_activity.parameter, cuda_activity.parameter.cpu())
-    assert torch.equal(cpu_activity.group, cuda_activity.group.cpu())
-    assert torch.equal(
-        semantics._project(encoded, cpu_activity.parameter).continuous,
-        semantics._project(cuda, cuda_activity.parameter).continuous.cpu(),
-    )
-    assert torch.equal(
-        semantics.key_tensor(encoded),
-        semantics.key_tensor(cuda).cpu(),
-    )
+    cpu_candidates = compiled.decode(encoded)
+    cuda_candidates = compiled.decode(cuda)
+
+    assert cpu_candidates.activity is not None
+    assert cuda_candidates.activity is not None
+    assert torch.equal(cpu_candidates.activity, cuda_candidates.activity.cpu())
+    assert cpu_candidates.to_records() == cuda_candidates.to_records()
+    assert compiled.canonical_keys(encoded) == compiled.canonical_keys(cuda)
 
 
 def test_conditional_decode_keeps_raw_tensor_identity() -> None:

@@ -177,20 +177,18 @@ def test_contextual_finite_completion_returns_every_available_semantic_row(
         population_size=3,
         generations=0,
     )
-    sampler = nsga2_module._SobolPopulationSampler(spec, None)
     repeated = torch.tensor([[1.0, 0.0]])
     monkeypatch.setattr(
-        sampler,
+        nsga2_module._SobolPopulationSampler,
         "draw",
-        lambda count: repeated.expand(count, -1).clone(),
+        lambda _sampler, count: repeated.expand(count, -1).clone(),
     )
 
-    population = search._initialize(
-        sampler,
-        spec,
+    result = search.minimize(
+        lambda population: population.sum(dim=1),
         incumbents=repeated,
-        initial_population=None,
     )
+    population = result.population
 
     assert population.shape == (2, 2)
     assert torch.equal(population[:, 0], torch.ones(2))
