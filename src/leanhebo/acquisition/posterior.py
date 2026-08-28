@@ -73,7 +73,8 @@ class PosteriorEvaluator:
             means.append(mean)
             variances.append(variance)
             noise = chunk_noise if noise is None else noise
-        mean = torch.cat(means)
-        variance = torch.cat(variances).clamp_min(torch.finfo(continuous.dtype).eps)
+        mean = means[0] if len(means) == 1 else torch.cat(means)
+        variance = variances[0] if len(variances) == 1 else torch.cat(variances)
+        variance = variance.clamp_min(torch.finfo(continuous.dtype).eps)
         assert noise is not None
         return PosteriorStats(mean, variance, variance.sqrt(), noise)
