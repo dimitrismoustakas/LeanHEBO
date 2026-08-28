@@ -153,6 +153,9 @@ class LeanHEBO:
         self._force_full_refit = False
         self._previous_population: torch.Tensor | None = None
         self._last_search: NSGA2Result | None = None
+        self._base_search_spec = (
+            self._search_spec(None) if self.space.dense_dimension else None
+        )
 
     @property
     def random_samples(self) -> int:
@@ -313,7 +316,11 @@ class LeanHEBO:
             encoded = self.space._encoded_from_dense_unchecked(dense, fixed=search_fixed)
             return mace(encoded.continuous, encoded.categorical)
 
-        search_spec = self._search_spec(fixed)
+        if fixed is None:
+            assert self._base_search_spec is not None
+            search_spec = self._base_search_spec
+        else:
+            search_spec = self._search_spec(fixed)
         search_options: dict[str, Any] = {
             "population_size": self.config.search.population_size,
             "generations": self.config.search.generations,
@@ -355,16 +362,15 @@ class LeanHEBO:
         )
         # A non-empty population always has a rank-zero front.
         pool = result.pareto_population
-        candidates = self.space.candidate_from_dense(pool, fixed=fixed)
-        unique = self.store.unique_mask(candidates)
-        candidates = candidates.select(unique)
+        candidates = self.space.encoded_from_dense(pool, fixed=fixed)
+        candidates = candidates.select(self.store.unique_mask(candidates))
         if len(candidates):
             with self.diagnostics.phase("suggest.selection"):
                 stats = posterior.evaluate(candidates.continuous, candidates.categorical)
                 selected_indices = self._selection_indices(
                     stats, min(n_suggestions, len(candidates))
                 )
-                selected = candidates.select(selected_indices)
+                selected = self.space.decode(candidates.select(selected_indices), fixed=fixed)
         else:
             selected = None
         with self.diagnostics.phase("suggest.uniqueness"):
