@@ -436,7 +436,7 @@ class ExactGPSurrogate:
             loss: torch.Tensor = -mll(distribution, self.train_targets)
         return loss
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def predict(
         self,
         continuous: torch.Tensor,

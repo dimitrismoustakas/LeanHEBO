@@ -311,7 +311,7 @@ class TorchNSGA2:
         *,
         expected_objectives: int | None = None,
     ) -> Tensor:
-        with torch.no_grad():
+        with torch.inference_mode():
             values = objective(population)
         if not isinstance(values, Tensor):
             raise TypeError("objective must return a torch.Tensor")
