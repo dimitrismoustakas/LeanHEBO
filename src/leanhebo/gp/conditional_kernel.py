@@ -145,10 +145,7 @@ class _FeatureBlock(nn.Module):
         categorical_indices = self.categorical_indices.to(device=categorical.device)
         selected_continuous = continuous.index_select(1, continuous_indices)
         selected_categorical = categorical.index_select(1, categorical_indices)
-        result: torch.Tensor = self.feature_extractor._forward_unchecked(
-            selected_continuous,
-            selected_categorical,
-        )
+        result: torch.Tensor = self.feature_extractor(selected_continuous, selected_categorical)
         return result
 
 

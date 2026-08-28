@@ -48,7 +48,7 @@ class _MixedExactGP(gpytorch.models.ExactGP):  # type: ignore[misc]
     def forward(
         self, continuous: torch.Tensor, categorical: torch.Tensor
     ) -> gpytorch.distributions.MultivariateNormal:
-        features = self.feature_extractor._forward_unchecked(continuous, categorical)
+        features = self.feature_extractor(continuous, categorical)
         return gpytorch.distributions.MultivariateNormal(
             self.mean_module(features), self.covar_module(features)
         )
@@ -129,13 +129,8 @@ class ExactGPSurrogate:
             raise ValueError("continuous and categorical batch lengths differ")
         if not torch.isfinite(continuous).all():
             raise ValueError("continuous GP inputs must all be finite")
-        invalid_categories = (categorical < 0) | (
-            categorical >= self._category_sizes_tensor.unsqueeze(0)
-        )
-        invalid_dimensions = invalid_categories.any(dim=0)
-        if bool(invalid_dimensions.any()):
-            index = int(torch.nonzero(invalid_dimensions, as_tuple=False)[0, 0].item())
-            raise ValueError(f"categorical codes in dimension {index} are out of bounds")
+        if bool(((categorical < 0) | (categorical >= self._category_sizes_tensor)).any()):
+            raise ValueError("categorical codes are out of bounds")
         return continuous.contiguous(), categorical.contiguous()
 
     def _prepare_prediction_inputs(

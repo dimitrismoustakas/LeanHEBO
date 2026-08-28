@@ -45,7 +45,8 @@ class MixedVariableSpec:
 
     Equal lower and upper bounds are always treated as fixed. Explicit ``fixed_mask`` entries use
     ``fixed_values`` (or ``lower`` when values are omitted), which supports contextual optimization
-    without changing population shapes.
+    without changing population shapes. Derived ``mutable_*`` masks and ``has_*``/``mutable_count``
+    summaries are precomputed once for the evolutionary hot path.
     """
 
     lower: Tensor
@@ -55,10 +56,10 @@ class MixedVariableSpec:
     steps: Tensor
     fixed_mask: Tensor
     fixed_values: Tensor
-    _numeric_mask: Tensor = field(init=False, repr=False, compare=False)
-    _mutable_numeric_mask: Tensor = field(init=False, repr=False, compare=False)
-    _mutable_integer_mask: Tensor = field(init=False, repr=False, compare=False)
-    _mutable_categorical_mask: Tensor = field(init=False, repr=False, compare=False)
+    numeric_mask: Tensor = field(init=False, repr=False, compare=False)
+    mutable_numeric_mask: Tensor = field(init=False, repr=False, compare=False)
+    mutable_integer_mask: Tensor = field(init=False, repr=False, compare=False)
+    mutable_categorical_mask: Tensor = field(init=False, repr=False, compare=False)
     has_numeric: bool = field(init=False, repr=False, compare=False)
     has_integer: bool = field(init=False, repr=False, compare=False)
     has_categorical: bool = field(init=False, repr=False, compare=False)
@@ -183,15 +184,17 @@ class MixedVariableSpec:
         object.__setattr__(self, "steps", steps)
         object.__setattr__(self, "fixed_mask", fixed_mask)
         object.__setattr__(self, "fixed_values", fixed_values)
+        # ``lower == upper`` dimensions were folded into ``fixed_mask`` above, so every mutable
+        # dimension has positive span. Operators rely on this to gate their RNG draws on these
+        # masks without re-checking spans; changing the folding rule changes seeded runs.
         mutable_mask = ~fixed_mask
-        numeric_mask = ~categorical_mask
-        mutable_numeric_mask = numeric_mask & mutable_mask
+        mutable_numeric_mask = ~categorical_mask & mutable_mask
         mutable_integer_mask = integer_mask & mutable_mask
         mutable_categorical_mask = categorical_mask & mutable_mask
-        object.__setattr__(self, "_numeric_mask", numeric_mask)
-        object.__setattr__(self, "_mutable_numeric_mask", mutable_numeric_mask)
-        object.__setattr__(self, "_mutable_integer_mask", mutable_integer_mask)
-        object.__setattr__(self, "_mutable_categorical_mask", mutable_categorical_mask)
+        object.__setattr__(self, "numeric_mask", ~categorical_mask)
+        object.__setattr__(self, "mutable_numeric_mask", mutable_numeric_mask)
+        object.__setattr__(self, "mutable_integer_mask", mutable_integer_mask)
+        object.__setattr__(self, "mutable_categorical_mask", mutable_categorical_mask)
         object.__setattr__(self, "has_numeric", bool(mutable_numeric_mask.any()))
         object.__setattr__(self, "has_integer", bool(mutable_integer_mask.any()))
         object.__setattr__(self, "has_categorical", bool(mutable_categorical_mask.any()))
@@ -203,30 +206,6 @@ class MixedVariableSpec:
         """Number of columns in a dense population."""
 
         return self.lower.numel()
-
-    @property
-    def numeric_mask(self) -> Tensor:
-        """Mask of continuous and integer (but not categorical) columns."""
-
-        return self._numeric_mask
-
-    @property
-    def mutable_numeric_mask(self) -> Tensor:
-        """Mask of numeric columns that evolutionary operators may change."""
-
-        return self._mutable_numeric_mask
-
-    @property
-    def mutable_integer_mask(self) -> Tensor:
-        """Mask of integer columns that evolutionary operators may change."""
-
-        return self._mutable_integer_mask
-
-    @property
-    def mutable_categorical_mask(self) -> Tensor:
-        """Mask of categorical columns that evolutionary operators may change."""
-
-        return self._mutable_categorical_mask
 
 
 def repair_population(population: Tensor, spec: MixedVariableSpec) -> Tensor:

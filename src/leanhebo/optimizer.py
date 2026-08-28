@@ -299,22 +299,13 @@ class LeanHEBO:
             generator=self.random.acquisition,
         )
 
-        dense_lower = self.space.dense_lower_bounds.to(device=self.device, dtype=self.dtype)
-        dense_upper = self.space.dense_upper_bounds.to(device=self.device, dtype=self.dtype)
-        rounding_mask = self.space._regular_continuous_rounding_mask.to(device=self.device)
         search_fixed = fixed.to(self.device, dtype=self.dtype) if fixed is not None else None
 
         def objective(dense: torch.Tensor) -> torch.Tensor:
             # NSGA-II already repairs its populations, but encoded conversion must still handle
             # non-uniform domains such as logarithmic integers. Fuse that final canonicalization
             # with the dense split instead of materializing and validating a second dense tensor.
-            encoded = self.space._encoded_from_dense_unchecked(
-                dense,
-                lower=dense_lower,
-                upper=dense_upper,
-                rounding_mask=rounding_mask,
-                fixed=search_fixed,
-            )
+            encoded = self.space._encoded_from_dense_unchecked(dense, fixed=search_fixed)
             return mace(encoded.continuous, encoded.categorical)
 
         search_spec = self._search_spec(fixed)

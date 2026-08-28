@@ -32,19 +32,6 @@ class MixedFeatureExtractor(nn.Module):
         self.output_dimensions = num_continuous + sum(embedding_sizes)
 
     def forward(self, continuous: torch.Tensor, categorical: torch.Tensor) -> torch.Tensor:
-        if continuous.ndim != 2 or categorical.ndim != 2:
-            raise ValueError("GP inputs must be rank-two tensors")
-        if continuous.shape[0] != categorical.shape[0]:
-            raise ValueError("continuous and categorical batch lengths differ")
-        if continuous.shape[1] != self.num_continuous:
-            raise ValueError("unexpected number of continuous GP inputs")
-        if categorical.shape[1] != len(self.embeddings):
-            raise ValueError("unexpected number of categorical GP inputs")
-        return self._forward_unchecked(continuous, categorical)
-
-    def _forward_unchecked(
-        self, continuous: torch.Tensor, categorical: torch.Tensor
-    ) -> torch.Tensor:
         if not self.embeddings:
             return continuous
         embedded = [

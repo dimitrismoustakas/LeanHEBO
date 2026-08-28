@@ -11,13 +11,10 @@ from typing import Protocol
 import torch
 from torch import Tensor
 
-from leanhebo.search.conditional_operators import _conditional_mutation_unchecked
+from leanhebo.search.conditional_operators import conditional_mutation
 from leanhebo.search.duplicates import _exact_duplicate_mask
 from leanhebo.search.nsga2 import TorchNSGA2, _SobolPopulationSampler
-from leanhebo.search.operators import (
-    _binary_tournament_unchecked,
-    _mixed_variable_crossover_unchecked,
-)
+from leanhebo.search.operators import binary_tournament, mixed_variable_crossover
 from leanhebo.search.repair import MixedVariableSpec, repair_population
 
 
@@ -227,7 +224,7 @@ class ConditionalTorchNSGA2(TorchNSGA2):
         generator: torch.Generator | None,
     ) -> Tensor:
         pair_count = math.ceil(count / 2)
-        parent_indices = _binary_tournament_unchecked(
+        parent_indices = binary_tournament(
             ranks,
             crowding,
             pair_count * 2,
@@ -236,7 +233,7 @@ class ConditionalTorchNSGA2(TorchNSGA2):
         )
         parent_a = population[parent_indices[0::2]]
         parent_b = population[parent_indices[1::2]]
-        child_a, child_b = _mixed_variable_crossover_unchecked(
+        child_a, child_b = mixed_variable_crossover(
             parent_a,
             parent_b,
             spec,
@@ -246,7 +243,7 @@ class ConditionalTorchNSGA2(TorchNSGA2):
             generator=generator,
         )
         children = torch.stack((child_a, child_b), dim=1).reshape(-1, spec.dimension)[:count]
-        return _conditional_mutation_unchecked(
+        return conditional_mutation(
             children,
             spec,
             self.semantics,

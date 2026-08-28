@@ -129,9 +129,13 @@ class CompiledSpace:
     _continuous_parameters: tuple[Float | Integer, ...] = field(init=False, repr=False)
     _categorical_parameters: tuple[Categorical | Bool, ...] = field(init=False, repr=False)
     _static_parameters: tuple[Integer | Categorical, ...] = field(init=False, repr=False)
-    _regular_continuous_rounding_mask: torch.Tensor = field(init=False, repr=False)
-    _has_regular_continuous_rounding: bool = field(init=False, repr=False)
-    _power_continuous_indices: tuple[int, ...] = field(init=False, repr=False)
+    _continuous_rounding_mask: torch.Tensor = field(init=False, repr=False)
+    _has_continuous_rounding: bool = field(init=False, repr=False)
+    _power_integer_indices: tuple[int, ...] = field(init=False, repr=False)
+    _dense_repair_cache: dict[
+        tuple[torch.device, torch.dtype],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ] = field(init=False, repr=False, compare=False)
     _name_positions: dict[str, tuple[Literal["continuous", "categorical"], int]] = field(
         init=False, repr=False, compare=False
     )
@@ -201,25 +205,22 @@ class CompiledSpace:
         )
         object.__setattr__(self, "categorical_mask", categorical_mask)
         object.__setattr__(self, "rounding_mask", rounding_mask)
+        object.__setattr__(self, "_continuous_rounding_mask", rounding_mask[: len(continuous)])
         object.__setattr__(
             self,
-            "_regular_continuous_rounding_mask",
-            rounding_mask[: len(continuous)],
-        )
-        object.__setattr__(
-            self,
-            "_has_regular_continuous_rounding",
+            "_has_continuous_rounding",
             bool(rounding_mask[: len(continuous)].any()),
         )
         object.__setattr__(
             self,
-            "_power_continuous_indices",
+            "_power_integer_indices",
             tuple(
                 index
                 for index, parameter in enumerate(continuous)
                 if isinstance(parameter, Integer) and parameter.mode == "power"
             ),
         )
+        object.__setattr__(self, "_dense_repair_cache", {})
         object.__setattr__(
             self,
             "_conditional_semantics",
@@ -484,17 +485,7 @@ class CompiledSpace:
             raise ValueError(f"dense coordinates must have shape [rows, {self.dense_dimension}]")
         values = dense.to(dtype=self.dtype)
         if repair:
-            lower = self.dense_lower_bounds.to(device=values.device, dtype=values.dtype)
-            upper = self.dense_upper_bounds.to(device=values.device, dtype=values.dtype)
-            rounding_mask = self._regular_continuous_rounding_mask.to(device=values.device)
-            fixed_input = self._coerce_fixed(fixed)
-            return self._encoded_from_dense_unchecked(
-                values,
-                lower=lower,
-                upper=upper,
-                rounding_mask=rounding_mask,
-                fixed=fixed_input,
-            )
+            return self._encoded_from_dense_unchecked(values, fixed=self._coerce_fixed(fixed))
         continuous = values[:, : self.n_continuous]
         categorical = values[:, self.n_continuous :].to(dtype=torch.int64)
         encoded = EncodedBatch(continuous, categorical)
@@ -502,25 +493,38 @@ class CompiledSpace:
         fixed_input = self._coerce_fixed(fixed)
         return self.apply_fixed(encoded, fixed_input) if fixed_input is not None else encoded
 
+    def _dense_repair_tensors(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return cached device-resident bounds and rounding metadata for dense repair."""
+
+        key = (device, dtype)
+        cached = self._dense_repair_cache.get(key)
+        if cached is None:
+            cached = (
+                self.dense_lower_bounds.to(device=device, dtype=dtype),
+                self.dense_upper_bounds.to(device=device, dtype=dtype),
+                self._continuous_rounding_mask.to(device=device),
+            )
+            self._dense_repair_cache[key] = cached
+        return cached
+
     def _encoded_from_dense_unchecked(
         self,
         dense: torch.Tensor,
         *,
-        lower: torch.Tensor,
-        upper: torch.Tensor,
-        rounding_mask: torch.Tensor,
         fixed: FixedInput | None,
     ) -> EncodedBatch:
-        """Encode an internal dense population using device-resident repair metadata."""
+        """Encode an internal dense population, fusing repair with the dense split."""
 
+        lower, upper, rounding_mask = self._dense_repair_tensors(dense.device, dense.dtype)
         continuous = dense[:, : self.n_continuous].clone()
-        categorical_values = dense[:, self.n_continuous :].clone()
         continuous_lower = lower[: self.n_continuous]
         continuous_upper = upper[: self.n_continuous]
         continuous.clamp_(min=continuous_lower, max=continuous_upper)
-        if self._has_regular_continuous_rounding:
+        if self._has_continuous_rounding:
             continuous[:, rounding_mask] = continuous[:, rounding_mask].round()
-        for index in self._power_continuous_indices:
+        for index in self._power_integer_indices:
             cont_parameter = self._continuous_parameters[index]
             assert isinstance(cont_parameter, Integer)
             column = continuous[:, index]
@@ -533,7 +537,7 @@ class CompiledSpace:
                 semantic,
                 dtype=column.dtype,
             ).clamp(continuous_lower[index], continuous_upper[index])
-        categorical_values = categorical_values.round().clamp(
+        categorical_values = dense[:, self.n_continuous :].round().clamp(
             min=lower[self.n_continuous :],
             max=upper[self.n_continuous :],
         )

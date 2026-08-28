@@ -27,7 +27,11 @@ class SurvivalSelection:
 
 
 def select_survivors(objectives: Tensor, n_survive: int) -> SurvivalSelection:
-    """Select complete fronts and crowding-best members of the split front."""
+    """Select complete fronts and crowding-best members of the split front.
+
+    Ranking stops once the survivors are covered: rows past the cut share one sentinel
+    tail rank and zero crowding, so per-row metrics are only meaningful for survivors.
+    """
 
     if n_survive < 0:
         raise ValueError("n_survive must be non-negative")
