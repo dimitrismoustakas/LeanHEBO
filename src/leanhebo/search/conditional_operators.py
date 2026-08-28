@@ -41,12 +41,11 @@ def conditional_mutation(
     eta: float = 20.0,
     generator: torch.Generator | None = None,
 ) -> Tensor:
-    """Mutate active, nonfixed genes with a default probability computed per row."""
+    """Mutate active, nonfixed genes in an already repaired population."""
 
-    canonical = _repair_population_unchecked(population, spec)
-    if canonical.shape[0] == 0 or probability == 0:
-        return canonical
-    active = _validated_activity_mask(canonical, semantics)
+    if population.shape[0] == 0 or probability == 0:
+        return population.clone()
+    active = _validated_activity_mask(population, semantics)
     categorical_counts = torch.round(spec.upper - spec.lower + 1.0).to(torch.long)
     mutable_numeric = spec.mutable_numeric_mask & (spec.upper > spec.lower)
     mutable_categorical = spec.mutable_categorical_mask & (categorical_counts > 1)
@@ -56,24 +55,25 @@ def conditional_mutation(
         mutable_counts = mutable.sum(dim=1, keepdim=True)
         row_probability = torch.where(
             mutable_counts > 0,
-            mutable_counts.reciprocal().to(dtype=canonical.dtype),
-            torch.zeros_like(mutable_counts, dtype=canonical.dtype),
+            mutable_counts.reciprocal().to(dtype=population.dtype),
+            torch.zeros_like(mutable_counts, dtype=population.dtype),
         )
     else:
-        row_probability = canonical.new_full((canonical.shape[0], 1), probability)
+        row_probability = population.new_full((population.shape[0], 1), probability)
 
     mutate = (
-        torch.rand(canonical.shape, device=canonical.device, generator=generator) < row_probability
+        torch.rand(population.shape, device=population.device, generator=generator)
+        < row_probability
     ) & mutable
 
     span = spec.upper - spec.lower
-    safe_span = span.clamp_min(torch.finfo(canonical.dtype).eps)
-    delta_lower = (canonical - spec.lower) / safe_span
-    delta_upper = (spec.upper - canonical) / safe_span
+    safe_span = span.clamp_min(torch.finfo(population.dtype).eps)
+    delta_lower = (population - spec.lower) / safe_span
+    delta_upper = (spec.upper - population) / safe_span
     random = torch.rand(
-        canonical.shape,
-        dtype=canonical.dtype,
-        device=canonical.device,
+        population.shape,
+        dtype=population.dtype,
+        device=population.device,
         generator=generator,
     )
     mutation_power = 1.0 / (eta + 1.0)
@@ -82,13 +82,15 @@ def conditional_mutation(
     upper_base = 2.0 * (1.0 - random) + 2.0 * (random - 0.5) * (1.0 - delta_upper).pow(eta + 1.0)
     upper_delta = 1.0 - upper_base.clamp_min(0).pow(mutation_power)
     delta = torch.where(random <= 0.5, lower_delta, upper_delta)
-    numeric_candidate = (canonical + delta * span).clamp(min=spec.lower, max=spec.upper)
+    numeric_candidate = (population + delta * span).clamp(min=spec.lower, max=spec.upper)
 
     alternatives = torch.floor(random * (categorical_counts - 1).clamp_min(1)).to(torch.long) + 1
-    current = torch.round(canonical - spec.lower).to(torch.long)
+    current = torch.round(population - spec.lower).to(torch.long)
     categorical_candidate = (
-        torch.remainder(current + alternatives, categorical_counts.clamp_min(1)).to(canonical.dtype)
+        torch.remainder(current + alternatives, categorical_counts.clamp_min(1)).to(
+            population.dtype
+        )
         + spec.lower
     )
     candidate = torch.where(mutable_numeric, numeric_candidate, categorical_candidate)
-    return _repair_population_unchecked(torch.where(mutate, candidate, canonical), spec)
+    return _repair_population_unchecked(torch.where(mutate, candidate, population), spec)
