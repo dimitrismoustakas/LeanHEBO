@@ -360,7 +360,8 @@ class OutputTransform(nn.Module):
             if fit_call - last_refit < self.refit_interval:
                 return self
 
-        flat = y.detach().reshape(-1)
+        # This is a tiny scalar fit; CPU execution avoids a synchronization per golden step.
+        flat = y.detach().reshape(-1).cpu()
         finite = flat[torch.isfinite(flat)]
         if finite.numel() == 0:
             input_scale = flat.new_ones(())

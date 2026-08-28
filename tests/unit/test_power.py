@@ -111,3 +111,15 @@ def test_explicit_power_transform_reports_domain_and_fit_errors() -> None:
 def test_output_transform_requires_scalar_objective_shape() -> None:
     with pytest.raises(ValueError, match="objective shape"):
         OutputTransform().fit(torch.ones(3, 2))
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_cuda_output_transform_keeps_state_and_results_on_cuda() -> None:
+    values = torch.tensor([-3.0, -1.0, 0.0, 2.0, 8.0])
+    expected = OutputTransform().fit(values)
+    actual = OutputTransform().cuda().fit(values.cuda())
+
+    assert actual._lambda.device.type == "cuda"
+    assert torch.equal(actual._lambda.cpu(), expected._lambda)
+    torch.testing.assert_close(actual.transform(values.cuda()).cpu(), expected.transform(values))
