@@ -5,14 +5,16 @@
 
 from __future__ import annotations
 
+import math
 from typing import Protocol
 
 import torch
 from torch import Tensor
 
-from leanhebo.search.conditional_operators import conditional_mutation
+from leanhebo.search.conditional_operators import conditional_mutation, semantic_lift
 from leanhebo.search.duplicates import _exact_duplicate_mask
 from leanhebo.search.nsga2 import TorchNSGA2, _SobolPopulationSampler
+from leanhebo.search.operators import binary_tournament, mixed_variable_crossover
 from leanhebo.search.repair import MixedVariableSpec, repair_population
 
 
@@ -25,6 +27,16 @@ class ConditionalSearchSemantics(Protocol):
 
     def activity_mask(self, population: Tensor) -> Tensor:
         """Return a boolean ``[population, dense dimensions]`` activity mask."""
+
+        ...
+
+    def canonicalize_dense(self, population: Tensor) -> Tensor:
+        """Canonicalize dense encodings while retaining inactive values."""
+
+        ...
+
+    def project(self, population: Tensor) -> Tensor:
+        """Return contextual canonical representatives of semantic configurations."""
 
         ...
 
@@ -109,7 +121,7 @@ def eliminate_semantic_duplicates(
 
 
 class ConditionalTorchNSGA2(TorchNSGA2):
-    """Dense latent-gene NSGA-II whose equality and mutation follow conditional semantics."""
+    """NSGA-II whose stored populations and variation follow conditional semantics."""
 
     def __init__(
         self,
@@ -148,7 +160,8 @@ class ConditionalTorchNSGA2(TorchNSGA2):
             raise ValueError(f"finite_completion must return shape [n, {self._spec.dimension}]")
         if completion.device != existing.device or completion.dtype != existing.dtype:
             raise ValueError("finite_completion must share population device and dtype")
-        return repair_population(completion, self._spec)[:count]
+        repaired = repair_population(completion, self._spec)[:count]
+        return self.semantics.project(repaired)
 
     def _initialize(
         self,
@@ -164,7 +177,7 @@ class ConditionalTorchNSGA2(TorchNSGA2):
             spec=spec,
             name="initial_population",
         )
-        seeded = torch.cat((incumbent_rows, initial_rows), dim=0)
+        seeded = self.semantics.project(torch.cat((incumbent_rows, initial_rows), dim=0))
         population_keys: Tensor | None = None
         if self.eliminate_duplicate_points:
             seeded_keys = _semantic_keys(seeded, self.semantics)
@@ -177,7 +190,7 @@ class ConditionalTorchNSGA2(TorchNSGA2):
                 break
             remaining = self.population_size - population.shape[0]
             draw_count = remaining if not self.eliminate_duplicate_points else max(remaining * 2, 4)
-            candidates = sampler.draw(draw_count)
+            candidates = self.semantics.project(sampler.draw(draw_count))
             if self.eliminate_duplicate_points:
                 assert population_keys is not None
                 candidate_keys = _semantic_keys(candidates, self.semantics)
@@ -221,6 +234,40 @@ class ConditionalTorchNSGA2(TorchNSGA2):
             generator=generator,
         )
 
+    def _semantic_offspring_batch(
+        self,
+        population: Tensor,
+        ranks: Tensor,
+        crowding: Tensor,
+        spec: MixedVariableSpec,
+        sampler: _SobolPopulationSampler,
+        count: int,
+        generator: torch.Generator | None,
+    ) -> Tensor:
+        pair_count = math.ceil(count / 2)
+        parent_indices = binary_tournament(
+            ranks,
+            crowding,
+            pair_count * 2,
+            generator=generator,
+            tournament_size=self.tournament_size,
+        )
+        parent_a = population[parent_indices[0::2]]
+        parent_b = population[parent_indices[1::2]]
+        completion = self.semantics.canonicalize_dense(sampler.draw(pair_count))
+        parent_a, parent_b = semantic_lift(parent_a, parent_b, completion, self.semantics)
+        child_a, child_b = mixed_variable_crossover(
+            parent_a,
+            parent_b,
+            spec,
+            probability=self.crossover_probability,
+            dimension_probability=self._CROSSOVER_DIMENSION_PROBABILITY,
+            eta=self.crossover_eta,
+            generator=generator,
+        )
+        children = torch.stack((child_a, child_b), dim=1).reshape(-1, spec.dimension)[:count]
+        return self.semantics.project(self._mutate(children, spec, generator))
+
     def _make_offspring(
         self,
         population: Tensor,
@@ -232,11 +279,12 @@ class ConditionalTorchNSGA2(TorchNSGA2):
     ) -> Tensor:
         target = population.shape[0]
         if not self.eliminate_duplicate_points:
-            return self._offspring_batch(
+            return self._semantic_offspring_batch(
                 population,
                 ranks,
                 crowding,
                 spec,
+                sampler,
                 target,
                 generator,
             )
@@ -248,11 +296,12 @@ class ConditionalTorchNSGA2(TorchNSGA2):
             remaining = target - offspring.shape[0]
             if remaining <= 0:
                 break
-            candidates = self._offspring_batch(
+            candidates = self._semantic_offspring_batch(
                 population,
                 ranks,
                 crowding,
                 spec,
+                sampler,
                 max(remaining * 2, 2),
                 generator,
             )
@@ -268,7 +317,7 @@ class ConditionalTorchNSGA2(TorchNSGA2):
 
         remaining = target - offspring.shape[0]
         if remaining > 0:
-            candidates = sampler.draw(max(remaining * 2, 4))
+            candidates = self.semantics.project(sampler.draw(max(remaining * 2, 4)))
             candidate_keys = _semantic_keys(candidates, self.semantics)
             candidates, candidate_keys = _eliminate_keyed(
                 candidates,

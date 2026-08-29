@@ -74,9 +74,34 @@ class _CompiledConditionalSearchSemantics:
             values[:, self.space.n_continuous :].to(torch.int64),
         )
 
+    @staticmethod
+    def _normalize_signed_zero(encoded: EncodedBatch) -> EncodedBatch:
+        continuous = torch.where(
+            encoded.continuous == 0,
+            torch.zeros_like(encoded.continuous),
+            encoded.continuous,
+        )
+        return EncodedBatch(continuous, encoded.categorical)
+
+    def _canonical_encoded(self, population: torch.Tensor) -> EncodedBatch:
+        values = population.to(dtype=self.space.dtype)
+        encoded = self.space._encoded_from_dense_unchecked(values, fixed=self.fixed)
+        return self._normalize_signed_zero(encoded)
+
     def activity_mask(self, population: torch.Tensor) -> torch.Tensor:
         activity = self._semantics.activity(self._encoded(population)).parameter
         return activity.index_select(1, self._dense_parameter_indices)
+
+    def canonicalize_dense(self, population: torch.Tensor) -> torch.Tensor:
+        return self._canonical_encoded(population).to_dense()
+
+    def project(self, population: torch.Tensor) -> torch.Tensor:
+        encoded = self._canonical_encoded(population)
+        activity = self._semantics.activity(encoded).parameter
+        projected = self._semantics._project(encoded, activity)
+        if self.fixed is not None:
+            projected = self.space.apply_fixed(projected, self.fixed)
+        return self._normalize_signed_zero(projected).to_dense()
 
     def semantic_keys(self, population: torch.Tensor) -> torch.Tensor:
         return self._semantics.key_tensor(self._encoded(population))

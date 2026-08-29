@@ -32,6 +32,29 @@ def _validated_activity_mask(
     return active
 
 
+def semantic_lift(
+    parent_a: Tensor,
+    parent_b: Tensor,
+    completion: Tensor,
+    semantics: ConditionalSearchSemantics,
+) -> tuple[Tensor, Tensor]:
+    """Choose parent representatives whose inactive values cannot affect crossover."""
+
+    active_a = _validated_activity_mask(parent_a, semantics)
+    active_b = _validated_activity_mask(parent_b, semantics)
+    lifted_a = torch.where(
+        active_a,
+        parent_a,
+        torch.where(active_b, parent_b, completion),
+    )
+    lifted_b = torch.where(
+        active_b,
+        parent_b,
+        torch.where(active_a, parent_a, completion),
+    )
+    return lifted_a, lifted_b
+
+
 def conditional_mutation(
     population: Tensor,
     spec: MixedVariableSpec,
