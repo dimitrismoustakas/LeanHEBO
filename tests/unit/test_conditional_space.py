@@ -241,6 +241,7 @@ def test_semantic_keys_include_activity_and_remain_on_the_input_device() -> None
 
     assert keys.dtype == torch.int64
     assert keys.device == encoded.device
+    assert keys.shape == (3, compiled.dense_dimension + 1)
     assert torch.equal(keys[0], keys[2])
     assert not torch.equal(keys[0], keys[1])
 

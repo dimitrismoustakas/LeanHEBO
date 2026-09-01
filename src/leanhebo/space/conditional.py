@@ -244,6 +244,8 @@ class ConditionalSemantics:
     programs: tuple[_CompiledNode | None, ...]
     parameter_to_group: tuple[int, ...]
     group_parameter_indices: tuple[tuple[int, ...], ...]
+    unconditional_parameter_indices: tuple[int, ...]
+    group_topological_order: tuple[int, ...]
     continuous_parameter_indices: tuple[int, ...]
     categorical_parameter_indices: tuple[int, ...]
     float_key_columns: tuple[int, ...]
@@ -491,6 +493,15 @@ class ConditionalSemantics:
             [round(parameters[index].optimization_bounds[0]) for index in categorical_indices],
             dtype=torch.int64,
         )
+        group_parameter_indices = tuple(tuple(indices) for indices in grouped)
+        group_topological_order = tuple(
+            sorted(
+                range(len(group_parameter_indices)),
+                key=lambda group: min(
+                    topological_position[index] for index in group_parameter_indices[group]
+                ),
+            )
+        )
         return cls(
             parameters,
             dtype,
@@ -498,7 +509,9 @@ class ConditionalSemantics:
             ancestor_parameter_indices,
             programs,
             tuple(parameter_to_group),
-            tuple(tuple(indices) for indices in grouped),
+            group_parameter_indices,
+            tuple(index for index, program in enumerate(programs) if program is None),
+            group_topological_order,
             continuous_indices,
             categorical_indices,
             tuple(continuous_columns[index] for index in float_key_parameter_indices),
@@ -526,18 +539,13 @@ class ConditionalSemantics:
             dtype=torch.bool,
             device=encoded.device,
         )
-        program_results: dict[_CompiledNode, torch.Tensor] = {}
         log_integer_values: dict[int, torch.Tensor] = {}
-        for index in self.topological_order:
-            program = self.programs[index]
-            if program is None:
-                parameter[:, index] = True
-                continue
-            result = program_results.get(program)
-            if result is None:
-                result = program.evaluate(encoded, parameter, log_integer_values)
-                program_results[program] = result
-            parameter[:, index] = result
+        parameter[:, self.unconditional_parameter_indices] = True
+        for group in self.group_topological_order:
+            indices = self.group_parameter_indices[group]
+            program = cast(_CompiledNode, self.programs[indices[0]])
+            result = program.evaluate(encoded, parameter, log_integer_values)
+            parameter[:, indices] = result[:, None]
         return parameter, log_integer_values
 
     def activity(self, encoded: EncodedBatch) -> ActivityBatch:
@@ -673,12 +681,19 @@ class ConditionalSemantics:
             value_components.append(encoded.categorical.to(torch.int64))
             value_activity.append(activity[:, self.categorical_parameter_indices])
 
+        # Parameters sharing one compiled condition always share activity.  One bit per condition
+        # group is therefore sufficient to distinguish an inactive value from the same value in
+        # an active group; repeating that bit for every parameter only widens duplicate keys.
+        group_activity = torch.stack(
+            [activity[:, indices[0]] for indices in self.group_parameter_indices],
+            dim=1,
+        ).to(torch.int64)
         if not value_components:
-            return activity.to(torch.int64)
+            return group_activity
         values = torch.cat(value_components, dim=1)
         active_values = torch.cat(value_activity, dim=1)
         masked_values = torch.where(active_values, values, torch.zeros_like(values))
-        return torch.cat((activity.to(torch.int64), masked_values), dim=1)
+        return torch.cat((group_activity, masked_values), dim=1)
 
     def context_is_finite(self, fixed_values: Mapping[str, object]) -> bool:
         """Decide whether every unfixed floating parameter is necessarily inactive."""
