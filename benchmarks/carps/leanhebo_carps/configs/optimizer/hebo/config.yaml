@@ -1,0 +1,6 @@
+name: HEBO
+optimizer:
+  _target_: leanhebo_carps.upstream.UpstreamHEBOOptimizer
+  seed: ${seed}
+  hebo_cfg:
+    scramble_seed: ${seed}

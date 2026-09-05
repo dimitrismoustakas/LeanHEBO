@@ -1,0 +1,15 @@
+[
+  {"name": "bbob/2/12/0", "n_trials": 77},
+  {"name": "bbob/2/20/0", "n_trials": 77},
+  {"name": "bbob/4/6/1", "n_trials": 100},
+  {"name": "yahpo/lcbench/168335/None", "n_trials": 126},
+  {"name": "yahpo/rbv2_glmnet/41157/None", "n_trials": 90},
+  {"name": "yahpo/rbv2_aknn/40498/None", "n_trials": 118},
+  {"name": "yahpo/rbv2_svm/182/None", "n_trials": 118},
+  {"name": "yahpo/rbv2_ranger/1515/None", "n_trials": 134},
+  {"name": "yahpo/rbv2_xgboost/1501/None", "n_trials": 170},
+  {"name": "bbob/8/15/0", "n_trials": 134},
+  {"name": "bbob/8/19/1", "n_trials": 134},
+  {"name": "bbob/8/21/2", "n_trials": 134},
+  {"name": "bbob/8/24/3", "n_trials": 134}
+]

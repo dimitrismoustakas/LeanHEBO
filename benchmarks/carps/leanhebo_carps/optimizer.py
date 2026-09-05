@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -77,7 +77,11 @@ class LeanHEBOOptimizer(Optimizer):
         if self.configspace.forbidden_clauses:
             raise ValueError("LeanHEBO does not support forbidden clauses")
 
-        self._ordinals: dict[str, tuple[object, ...]] = {}
+        self._ordinals = {
+            hp.name: tuple(hp.sequence)
+            for hp in self.configspace.values()
+            if isinstance(hp, OrdinalHyperparameter)
+        }
         self.leanhebo_space = self.convert_configspace(self.configspace)
         config = LeanHEBOConfig.from_dict({} if leanhebo_config is None else leanhebo_config)
         self.leanhebo_config = replace(
@@ -88,22 +92,12 @@ class LeanHEBOOptimizer(Optimizer):
         self._incumbent: tuple[TrialInfo, TrialValue] | None = None
 
     def convert_configspace(self, configspace: ConfigurationSpace) -> Space:
-        for hyperparameter in configspace.values():
-            if isinstance(hyperparameter, OrdinalHyperparameter):
-                self._ordinals[hyperparameter.name] = tuple(hyperparameter.sequence)
-
         parameters: list[Parameter] = []
         for hyperparameter in configspace.values():
             conditions = configspace.parent_conditions_of[hyperparameter.name]
-            active_when = self._convert_conditions(conditions)
+            active_when = self._convert_condition(conditions[0]) if conditions else None
             parameters.append(self._convert_hyperparameter(hyperparameter, active_when))
         return Space(*parameters)
-
-    def _convert_conditions(
-        self,
-        conditions: Sequence[ConfigSpaceCondition | Conjunction],
-    ) -> Condition | None:
-        return None if not conditions else self._convert_condition(conditions[0])
 
     def _convert_condition(
         self,
@@ -166,15 +160,10 @@ class LeanHEBOOptimizer(Optimizer):
         return LeanHEBO(self.leanhebo_space, config=self.leanhebo_config)
 
     def ask(self) -> TrialInfo:
-        if not isinstance(self.solver, LeanHEBO):
-            raise RuntimeError("optimizer has not been set up")
         return self.convert_to_trial(self.solver.suggest(1))
 
     def convert_to_trial(self, suggestion: CandidateBatch) -> TrialInfo:
-        records = suggestion.to_records()
-        if len(records) != 1:
-            raise ValueError(f"CARP-S requires one suggestion, got {len(records)}")
-        values = records[0]
+        (values,) = suggestion.to_records()
         for name, sequence in self._ordinals.items():
             if name in values:
                 values[name] = sequence[cast(int, values[name])]
@@ -182,11 +171,6 @@ class LeanHEBOOptimizer(Optimizer):
         return TrialInfo(config=config)
 
     def tell(self, trial_info: TrialInfo, trial_value: TrialValue) -> None:
-        if not isinstance(self.solver, LeanHEBO):
-            raise RuntimeError("optimizer has not been set up")
-        if isinstance(trial_value.cost, Sequence):
-            raise ValueError("LeanHEBO supports one objective")
-
         values = dict(trial_info.config)
         for name, sequence in self._ordinals.items():
             if name in values:

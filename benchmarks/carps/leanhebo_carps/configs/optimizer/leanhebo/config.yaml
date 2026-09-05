@@ -1,21 +1,5 @@
-# @package _global_
-optimizer_id: LeanHEBO
-optimizer_container_id: LeanHEBO
-hydra:
-  job_logging:
-    handlers:
-      file:
-        filename: ${hydra.runtime.output_dir}.log
-loggers:
-  - _target_: carps.loggers.file_logger.FileLogger
-    _partial_: true
-    overwrite: true
+name: LeanHEBO
 optimizer:
-  _target_: leanhebo_carps.timing.timed_optimizer
-  _partial_: true
-  optimizer_id: ${optimizer_id}
-  optimizer:
-    _target_: leanhebo_carps.optimizer.LeanHEBOOptimizer
-    _partial_: true
-    seed: ${seed}
-    leanhebo_config: {}
+  _target_: leanhebo_carps.optimizer.LeanHEBOOptimizer
+  seed: ${seed}
+  leanhebo_config: {}

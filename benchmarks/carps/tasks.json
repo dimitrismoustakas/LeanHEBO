@@ -1,80 +1,15 @@
 [
-  {
-    "config": "subset_bbob_16_1_1",
-    "task_id": "blackbox/20/test/bbob/16/1/1",
-    "name": "bbob/16/1/1",
-    "n_trials": 180
-  },
-  {
-    "config": "subset_bbob_16_11_0",
-    "task_id": "blackbox/20/test/bbob/16/11/0",
-    "name": "bbob/16/11/0",
-    "n_trials": 180
-  },
-  {
-    "config": "subset_bbob_2_12_2",
-    "task_id": "blackbox/20/test/bbob/2/12/2",
-    "name": "bbob/2/12/2",
-    "n_trials": 77
-  },
-  {
-    "config": "subset_bbob_2_6_1",
-    "task_id": "blackbox/20/test/bbob/2/6/1",
-    "name": "bbob/2/6/1",
-    "n_trials": 77
-  },
-  {
-    "config": "subset_bbob_2_9_0",
-    "task_id": "blackbox/20/test/bbob/2/9/0",
-    "name": "bbob/2/9/0",
-    "n_trials": 77
-  },
-  {
-    "config": "subset_bbob_32_11_0",
-    "task_id": "blackbox/20/test/bbob/32/11/0",
-    "name": "bbob/32/11/0",
-    "n_trials": 247
-  },
-  {
-    "config": "subset_bbob_32_9_0",
-    "task_id": "blackbox/20/test/bbob/32/9/0",
-    "name": "bbob/32/9/0",
-    "n_trials": 247
-  },
-  {
-    "config": "subset_bbob_8_22_0",
-    "task_id": "blackbox/20/test/bbob/8/22/0",
-    "name": "bbob/8/22/0",
-    "n_trials": 134
-  },
-  {
-    "config": "subset_yahpo_lcbench_167184_None",
-    "task_id": "blackbox/20/test/yahpo/lcbench/167184/None",
-    "name": "yahpo/lcbench/167184/None",
-    "n_trials": 126
-  },
-  {
-    "config": "subset_yahpo_rbv2_glmnet_32_None",
-    "task_id": "blackbox/20/test/yahpo/rbv2_glmnet/32/None",
-    "name": "yahpo/rbv2_glmnet/32/None",
-    "n_trials": 90
-  },
-  {
-    "config": "subset_yahpo_rbv2_glmnet_375_None",
-    "task_id": "blackbox/20/test/yahpo/rbv2_glmnet/375/None",
-    "name": "yahpo/rbv2_glmnet/375/None",
-    "n_trials": 90
-  },
-  {
-    "config": "subset_yahpo_rbv2_rpart_18_None",
-    "task_id": "blackbox/20/test/yahpo/rbv2_rpart/18/None",
-    "name": "yahpo/rbv2_rpart/18/None",
-    "n_trials": 110
-  },
-  {
-    "config": "subset_yahpo_rbv2_rpart_4534_None",
-    "task_id": "blackbox/20/test/yahpo/rbv2_rpart/4534/None",
-    "name": "yahpo/rbv2_rpart/4534/None",
-    "n_trials": 110
-  }
+  {"name": "bbob/16/1/1", "n_trials": 180},
+  {"name": "bbob/16/11/0", "n_trials": 180},
+  {"name": "bbob/2/12/2", "n_trials": 77},
+  {"name": "bbob/2/6/1", "n_trials": 77},
+  {"name": "bbob/2/9/0", "n_trials": 77},
+  {"name": "bbob/32/11/0", "n_trials": 247},
+  {"name": "bbob/32/9/0", "n_trials": 247},
+  {"name": "bbob/8/22/0", "n_trials": 134},
+  {"name": "yahpo/lcbench/167184/None", "n_trials": 126},
+  {"name": "yahpo/rbv2_glmnet/32/None", "n_trials": 90},
+  {"name": "yahpo/rbv2_glmnet/375/None", "n_trials": 90},
+  {"name": "yahpo/rbv2_rpart/18/None", "n_trials": 110},
+  {"name": "yahpo/rbv2_rpart/4534/None", "n_trials": 110}
 ]

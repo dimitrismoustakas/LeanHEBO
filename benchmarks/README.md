@@ -1,73 +1,60 @@
-# Benchmark
+# Benchmarks
 
-No benchmark result has been published yet.
+[HEBO comparison](results/hebo-comparison/report.md): LeanHEBO 0.3.0 versus HEBO 0.3.6,
+13 flat CARP-S tasks, 20 seeds. All 520 attempts are included; HEBO's three failed
+LCBench runs retain their best evaluated point. This is a historical result.
 
-The study asks one question: at the same CARP-S evaluation budgets, does LeanHEBO match
-upstream HEBO's optimization quality while spending less time in `ask` and `tell`?
+## Run and compare
 
-It uses the 13 flat tasks in [`tasks.json`](carps/tasks.json): eight BBOB tasks and five
-YAHPO surrogate HPO tasks from the CARP-S 1.1.0 black-box test set. Conditional tasks are outside
-this fixed study, and the HPOBench task requires a separate installation path. Each optimizer uses
-its defaults, suggests one point at a time on one CPU thread, and runs 20 seeds with CARP-S's task
-budgets: 34,900 evaluations per optimizer.
-
-Quality is CARP-S's pooled per-task min-max normalized incumbent cost; lower is better. The
-figure averages the fixed task set within each seed and shows a 95% interval over the 20 seeds.
-The table reports the paired quality difference, cumulative `ask` plus `tell` time, and the
-HEBO/LeanHEBO time ratio. Failed or incomplete runs stop the analysis instead of being dropped.
-
-## Run it
-
-The benchmark has a separate locked environment. It adds nothing to LeanHEBO's dependencies.
-The first setup builds CARP-S from source and can take about 15 minutes on Windows.
+The separate environment contains CARP-S, upstream HEBO, and YAHPO data. Setup requires
+`uv` and Git; the first build can take about 15 minutes on Windows.
 
 ```powershell
 python benchmarks/carps/prepare.py
-$python = (Resolve-Path 'benchmarks/.carps/venv/Scripts/python.exe').Path
-$env:CARPS_TASK_DATA_DIR = (Resolve-Path 'benchmarks/.carps/task_data').Path
-$env:OMP_NUM_THREADS = $env:MKL_NUM_THREADS = $env:OPENBLAS_NUM_THREADS = '1'
+$python = 'benchmarks/.carps/venv/Scripts/python.exe'
+& $python benchmarks/carps/run.py --optimizer leanhebo --seeds (1..20) --output benchmarks/.carps/runs
+& $python benchmarks/carps/run.py --optimizer hebo --seeds (1..20) --output benchmarks/.carps/runs
+& $python benchmarks/carps/analyze.py --runs benchmarks/.carps/runs --reference HEBO --output benchmarks/results/comparison
 ```
 
-Check the two real adapters with one trial each:
+On Linux, use `benchmarks/.carps/venv/bin/python`. Runs use one CPU thread and one suggestion
+at a time. `--trials 2` gives a short smoke check. Each run writes one `run.jsonl` containing
+settings, evaluated configurations, costs, and ask/tell times. Existing runs are never overwritten.
 
-```powershell
-$common = @(
-  'hydra.searchpath=[pkg://leanhebo_carps.configs]',
-  '+task/subselection/blackbox/test=subset_bbob_2_12_2',
-  'seed=1',
-  'task.optimization_resources.n_trials=1',
-  'baserundir=benchmarks/.carps/smoke'
-)
-uv run --no-project --python $python python -X utf8 -m carps.run `
-  '+optimizer/leanhebo=config' @common
-uv run --no-project --python $python python -X utf8 -m carps.run `
-  '+optimizer/hebo_timed=config' @common
-```
+Select another LeanHEBO checkout with `--source ../LeanHEBO-conditional --label LeanHEBO-conditional`.
+`--optimizer random` runs CARP-S random search. For another model or settings, pass a YAML file
+with `name` and `optimizer` entries, following the small [optimizer configs](carps/leanhebo_carps/configs/optimizer).
+Any sequential, single-objective CARP-S adapter can use the same runner and analysis.
 
-Run the full comparison only when its cost is intentional:
+## Tasks
 
-```powershell
-$tasks = ((Get-Content 'benchmarks/carps/tasks.json' -Raw | ConvertFrom-Json).config) -join ','
-$seeds = (1..20) -join ','
-$common = @(
-  'hydra.searchpath=[pkg://leanhebo_carps.configs]',
-  "+task/subselection/blackbox/test=$tasks",
-  "seed=$seeds",
-  'baserundir=benchmarks/.carps/runs'
-)
-uv run --no-project --python $python python -X utf8 -m carps.run --multirun `
-  '+optimizer/leanhebo=config' @common
-uv run --no-project --python $python python -X utf8 -m carps.run --multirun `
-  '+optimizer/hebo_timed=config' @common
+Pass a list with `--tasks`; each entry needs only `name` and `n_trials`.
 
-uv run --no-project --python $python python -X utf8 -m carps.analysis.gather_data `
-  'benchmarks/.carps/runs' --n_processes=1 --outdir='benchmarks/.carps/gathered'
-uv run --no-project --python $python python -X utf8 'benchmarks/carps/analyze.py' `
-  --logs 'benchmarks/.carps/gathered/logs.parquet' `
-  --runs 'benchmarks/.carps/runs' --output 'benchmarks/.carps/carps.png'
-```
+- [Development](carps/development_tasks.json), the default: 13 tasks, including four 8D BBOB
+  problems and conditional YAHPO spaces. The retained one-seed pilot supports further screening;
+  LCBench `168335` still needs a HEBO comparison before deciding whether to replace it.
+- [Flat comparison](carps/tasks.json): the original 13-task CARP-S test selection.
+- [Conditional holdout](carps/conditional_tasks.json): five SVM/XGBoost tasks.
+- [Synthetic diagnostics](carps/synthetic_tasks.json): activation, shared roots, eight exclusive
+  branches, a narrow active region (`gate > 0.9`), and mixed log/integer parameters. Each objective
+  is a sum of nonnegative offsets and weighted squares, with an attainable minimum of zero.
 
-For a later hyperparameter study, add a new optimizer config with a unique `optimizer_id` and
-run only that config. Tune on CARP-S development tasks, then evaluate the chosen setting on this
-test set. Existing test results remain reusable while the task list and benchmark lock stay
-unchanged; gather and analyze again to include the new result.
+YAHPO uses negative accuracy at maximum fidelity. A task's optional `metric` selects another
+YAHPO objective, such as `val_cross_entropy` for LCBench. Choose tasks and metrics on development
+data before the final comparison. Task construction uses each benchmark's own ConfigSpace.
+
+## Metrics
+
+Aggregate quality is the probability of beating the reference optimizer: compare every pair of
+runs within each task, count ties as half, then average tasks equally. 50% is neutral. Anytime
+probability averages 20 budget fractions from 5% to 100%. This uses the
+[probability of improvement](https://github.com/google-research/rliable#probability-of-improvement)
+metric; it measures how often an optimizer wins without normalizing task costs.
+Per-task plots show median and interquartile range of native cost, or regret against the known
+optimum for BBOB and synthetic tasks. The table also gives median paired cost differences.
+
+Failed runs carry their best evaluated cost through the remaining budget and count as failures.
+A run with no evaluated point has infinite cost. Timing includes only task/seed pairs completed
+by every compared optimizer; speedup is the median of paired time ratios. These are descriptive
+comparisons, with no confidence interval or significance claim. Analysis requires the same tasks,
+seeds, budgets, and objectives across optimizers.

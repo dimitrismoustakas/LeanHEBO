@@ -1,0 +1,7 @@
+[
+  {"name": "yahpo/rbv2_svm/1493/None", "n_trials": 118},
+  {"name": "yahpo/rbv2_xgboost/1457/None", "n_trials": 170},
+  {"name": "yahpo/rbv2_xgboost/1493/None", "n_trials": 170},
+  {"name": "yahpo/rbv2_xgboost/1510/None", "n_trials": 170},
+  {"name": "yahpo/rbv2_xgboost/41027/None", "n_trials": 170}
+]

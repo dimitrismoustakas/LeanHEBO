@@ -1,396 +1,324 @@
+"""Compare saved runs using win probabilities, native costs, and paired optimizer time."""
+
 from __future__ import annotations
 
 import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
 
-_RUN_KEYS = ["optimizer_id", "task_id", "seed"]
-_ROW_KEYS = [*_RUN_KEYS, "n_trials"]
-_LOG_COLUMNS = [*_ROW_KEYS, "trial_value__cost", "trial_value__status"]
-_TIMING_COLUMNS = [*_RUN_KEYS, "trial", "ask_seconds", "tell_seconds"]
-_SUCCESS = 1
-_NORMALIZATION_EPSILON = 1e-8
-_EXPECTED_TASKS = 13
-DEFAULT_FRACTIONS = np.linspace(0.05, 1.0, 20)
-DEFAULT_SEEDS = tuple(range(1, 21))
+
+@dataclass
+class Run:
+    optimizer: str
+    task: str
+    seed: int
+    budget: int
+    values: np.ndarray  # cost, ask seconds, tell seconds
+    failed: bool
+    optimum: float | None = None
+    metric: str = "cost"
 
 
-@dataclass(frozen=True)
-class Curves:
-    fractions: np.ndarray
-    optimizers: tuple[str, ...]
-    quality: np.ndarray
-    quality_lower: np.ndarray
-    quality_upper: np.ndarray
-    quality_repeats: np.ndarray
-    optimizer_seconds: np.ndarray
-    runs_per_optimizer: int
+def read_jsonl(path: Path) -> list[dict]:
+    return [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
 
 
-@dataclass(frozen=True)
-class Task:
-    task_id: str
-    name: str
-    n_trials: int
+def read_run(path: Path) -> Run:
+    header, *rows = read_jsonl(path)
+    trials = [row for row in rows if "trial" in row]
+    if [row["trial"] for row in trials] != list(range(1, len(trials) + 1)):
+        raise ValueError(f"Nonconsecutive trials: {path}")
+    values = np.asarray(
+        [[row["cost"], row["ask_seconds"], row["tell_seconds"]] for row in trials], dtype=float
+    ).reshape(-1, 3)
+    return Run(
+        header["optimizer"],
+        header["task"],
+        header["seed"],
+        header["n_trials"],
+        values,
+        any("error" in row for row in rows) or len(trials) < header["n_trials"],
+        header["optimum"],
+        header["metric"],
+    )
 
 
-def load_tasks(path: Path) -> tuple[Task, ...]:
-    """Load the task IDs and budgets pinned by the benchmark protocol."""
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list) or len(payload) != _EXPECTED_TASKS:
-        raise ValueError(f"tasks file must contain exactly {_EXPECTED_TASKS} tasks")
+def read_carps_run(config_path: Path) -> Run:
+    """Read the retained CARP-S comparisons without rewriting their raw results."""
+    from omegaconf import OmegaConf
 
-    tasks: list[Task] = []
-    task_ids: set[str] = set()
-    names: set[str] = set()
-    for entry in payload:
-        if not isinstance(entry, dict):
-            raise ValueError("each task entry must be an object")
-        task_id = entry.get("task_id")
-        name = entry.get("name")
-        budget = entry.get("n_trials")
-        if not isinstance(task_id, str) or not task_id:
-            raise ValueError("each task needs a non-empty task_id")
-        if not isinstance(name, str) or not name:
-            raise ValueError(f"task {task_id!r} needs a non-empty CARP-S name")
-        if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
-            raise ValueError(f"task {task_id!r} has an invalid n_trials budget")
-        if task_id in task_ids:
-            raise ValueError(f"duplicate task_id {task_id!r}")
-        if name in names:
-            raise ValueError(f"duplicate CARP-S task name {name!r}")
-        task_ids.add(task_id)
-        names.add(name)
-        tasks.append(Task(task_id=task_id, name=name, n_trials=budget))
-    return tuple(tasks)
+    config = OmegaConf.load(config_path)
+    task = OmegaConf.to_container(config.task, resolve=True)
+    directory = config_path.parent.parent
+    trial_path = directory / "trial_logs.jsonl"
+    rows = read_jsonl(trial_path) if trial_path.exists() else []
+    timing_path = directory / "optimizer_timing.jsonl"
+    timing = read_jsonl(timing_path) if timing_path.exists() else []
+    expected = list(range(1, len(rows) + 1))
+    if [row["n_trials"] for row in rows] != expected or [
+        row["trial"] for row in timing
+    ] != expected:
+        raise ValueError(f"Trial/timing mismatch: {directory}")
+    values = np.asarray(
+        [
+            [row["trial_value"]["cost"], clock["ask_seconds"], clock["tell_seconds"]]
+            for row, clock in zip(rows, timing, strict=True)
+        ],
+        dtype=float,
+    ).reshape(-1, 3)
+    succeeded = np.asarray([row["trial_value"]["status"] == 1 for row in rows])
+    if len(values):
+        values[~succeeded, 0] = np.inf
+    optimum = None
+    if task["name"].startswith("bbob/"):
+        import ioh
 
-
-def read_timing_jsonl(path: Path) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    paths = sorted(path.rglob("optimizer_timing.jsonl")) if path.is_dir() else [path]
-    if not paths:
-        raise ValueError(f"no optimizer_timing.jsonl files found under {path}")
-    for timing_path in paths:
-        with timing_path.open(encoding="utf-8") as stream:
-            for line_number, line in enumerate(stream, 1):
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError as error:
-                    raise ValueError(
-                        f"invalid JSON in {timing_path} on line {line_number}"
-                    ) from error
-                if not isinstance(row, dict):
-                    raise ValueError(f"{timing_path} line {line_number} is not an object")
-                rows.append(row)
-    if not rows:
-        raise ValueError("timing file is empty")
-    return pd.DataFrame(rows)
+        _, dimension, fid, instance = task["name"].split("/")
+        optimum = float(ioh.get_problem(int(fid), int(instance), int(dimension)).optimum.y)
+    return Run(
+        config["optimizer_id"],
+        task["name"],
+        config["seed"],
+        task["optimization_resources"]["n_trials"],
+        values,
+        not succeeded.all() or len(rows) < task["optimization_resources"]["n_trials"],
+        optimum,
+        task["output_space"]["objectives"][0],
+    )
 
 
-def _require_columns(frame: pd.DataFrame, required: list[str], name: str) -> None:
-    missing = sorted(set(required) - set(frame.columns))
-    if missing:
-        raise ValueError(f"{name} is missing columns: {', '.join(missing)}")
-
-
-def _integer_column(frame: pd.DataFrame, column: str, name: str) -> pd.Series:
-    values = pd.to_numeric(frame[column], errors="coerce")
-    array = values.to_numpy(dtype=float)
-    if not np.all(np.isfinite(array)) or not np.all(array == np.floor(array)):
-        raise ValueError(f"{name} {column} must contain finite integers")
-    return values.astype(np.int64)
-
-
-def _numeric_column(frame: pd.DataFrame, column: str, name: str) -> pd.Series:
-    values = pd.to_numeric(frame[column], errors="coerce")
-    if not np.all(np.isfinite(values.to_numpy(dtype=float))):
-        raise ValueError(f"{name} {column} must contain finite numbers")
-    return values.astype(float)
-
-
-def _validate_matrix(
-    logs: pd.DataFrame,
-    timing: pd.DataFrame,
-    tasks: tuple[Task, ...],
-    seeds: tuple[int, ...],
-) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...]]:
-    _require_columns(logs, _LOG_COLUMNS, "CARP-S logs")
-    _require_columns(timing, _TIMING_COLUMNS, "timing data")
-    logs = logs[_LOG_COLUMNS].copy()
-    timing = timing[_TIMING_COLUMNS].copy()
-    timing = timing.rename(columns={"trial": "n_trials"})
-
-    budgets = {task.task_id: task.n_trials for task in tasks}
-    task_names = {task.name: task.task_id for task in tasks}
-    timing["task_id"] = timing["task_id"].map(task_names)
-
-    for name, frame in (("CARP-S logs", logs), ("timing data", timing)):
-        if frame[_ROW_KEYS].isnull().any(axis=None):
-            raise ValueError(f"{name} contains missing run identifiers")
-        frame["seed"] = _integer_column(frame, "seed", name)
-        frame["n_trials"] = _integer_column(frame, "n_trials", name)
-        frame["optimizer_id"] = frame["optimizer_id"].astype(str)
-        frame["task_id"] = frame["task_id"].astype(str)
-        if frame.duplicated(_ROW_KEYS).any():
-            raise ValueError(f"{name} contains duplicate optimizer/task/seed/trial rows")
-
-    logs["trial_value__cost"] = _numeric_column(logs, "trial_value__cost", "CARP-S logs")
-    logs["trial_value__status"] = _integer_column(logs, "trial_value__status", "CARP-S logs")
-    timing["ask_seconds"] = _numeric_column(timing, "ask_seconds", "timing data")
-    timing["tell_seconds"] = _numeric_column(timing, "tell_seconds", "timing data")
-    if (timing[["ask_seconds", "tell_seconds"]] < 0.0).any(axis=None):
-        raise ValueError("timing data contains negative durations")
-
-    failures = logs["trial_value__status"] != _SUCCESS
-    if failures.any():
-        counts = logs.loc[failures].groupby("optimizer_id", sort=True).size()
-        detail = ", ".join(f"{optimizer}: {count}" for optimizer, count in counts.items())
-        raise ValueError(f"CARP-S logs contain failed trials ({detail})")
-
-    expected_tasks = set(budgets)
-    actual_tasks = set(logs["task_id"])
-    if actual_tasks != expected_tasks:
-        missing = sorted(expected_tasks - actual_tasks)
-        extra = sorted(actual_tasks - expected_tasks)
-        raise ValueError(f"task matrix mismatch; missing={missing}, extra={extra}")
-
-    optimizers = tuple(sorted(logs["optimizer_id"].unique().tolist()))
-    if len(optimizers) < 2:
-        raise ValueError("comparison needs at least two optimizers")
-    if set(timing["optimizer_id"]) != set(optimizers):
-        raise ValueError("quality and timing data contain different optimizers")
-    if set(timing["task_id"]) != expected_tasks:
-        raise ValueError("quality and timing data contain different tasks")
-
-    expected_runs = {
-        (optimizer, task_id, seed)
-        for optimizer in optimizers
-        for task_id in budgets
-        for seed in seeds
+def load_runs(paths: list[Path]) -> list[Run]:
+    runs = []
+    for path in paths:
+        runs.extend(read_run(p) for p in sorted(path.rglob("run.jsonl")))
+        runs.extend(read_carps_run(p) for p in sorted(path.rglob(".hydra/config.yaml")))
+    if not runs:
+        raise ValueError("No runs found")
+    keys = [(run.optimizer, run.task, run.seed) for run in runs]
+    expected = {
+        (o, t, s) for o in {r.optimizer for r in runs} for t, s in {(r.task, r.seed) for r in runs}
     }
-    for name, frame in (("CARP-S logs", logs), ("timing data", timing)):
-        actual_runs = set(frame[_RUN_KEYS].itertuples(index=False, name=None))
-        if actual_runs != expected_runs:
-            missing_count = len(expected_runs - actual_runs)
-            extra_count = len(actual_runs - expected_runs)
-            raise ValueError(
-                f"{name} run matrix is incomplete; missing={missing_count}, extra={extra_count}"
+    if len(set(keys)) != len(keys):
+        raise ValueError("Duplicate optimizer/task/seed runs")
+    if set(keys) != expected:
+        raise ValueError(f"Missing {len(expected - set(keys))} optimizer/task/seed runs")
+    for task in {run.task for run in runs}:
+        if len({(r.budget, r.metric, r.optimum) for r in runs if r.task == task}) != 1:
+            raise ValueError(f"Different budgets or objectives for {task}")
+    for run in runs:
+        if len(run.values) > run.budget or np.isnan(run.values).any():
+            raise ValueError(f"Invalid trial data: {run.optimizer}/{run.task}/{run.seed}")
+        if not np.isfinite(run.values[:, 1:]).all() or (run.values[:, 1:] < 0).any():
+            raise ValueError(f"Invalid timing: {run.optimizer}/{run.task}/{run.seed}")
+    return runs
+
+
+def summarize(runs: list[Run], reference: str) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    failed_pairs = {(r.task, r.seed) for r in runs if r.failed}
+    records = []
+    for run in runs:
+        costs = np.full(run.budget, np.inf)
+        costs[: len(run.values)] = run.values[:, 0]
+        incumbent = np.minimum.accumulate(costs)
+        seconds = np.cumsum(run.values[:, 1:].sum(axis=1))
+        for percent in range(5, 101, 5):
+            index = (percent * run.budget - 1) // 100
+            records.append(
+                {
+                    "optimizer": run.optimizer,
+                    "task": run.task,
+                    "seed": run.seed,
+                    "fraction": percent / 100,
+                    "cost": incumbent[index],
+                    "seconds": seconds[index]
+                    if (run.task, run.seed) not in failed_pairs
+                    else np.nan,
+                }
             )
-        for (optimizer, task_id, seed), run in frame.groupby(_RUN_KEYS, sort=False):
-            budget = budgets[task_id]
-            actual_trials = np.sort(run["n_trials"].to_numpy())
-            if not np.array_equal(actual_trials, np.arange(1, budget + 1)):
-                raise ValueError(
-                    f"{name} has incomplete trials for {optimizer}/{task_id}/seed={seed}"
-                )
-
-    return logs.sort_values(_ROW_KEYS), timing.sort_values(_ROW_KEYS), optimizers
-
-
-def extract_curves(
-    logs: pd.DataFrame,
-    timing: pd.DataFrame,
-    tasks: tuple[Task, ...],
-    *,
-    seeds: tuple[int, ...] = DEFAULT_SEEDS,
-    fractions: np.ndarray = DEFAULT_FRACTIONS,
-) -> Curves:
-    """Validate complete runs and derive the two reported curves."""
-    fractions = np.asarray(fractions, dtype=float)
-    if (
-        fractions.ndim != 1
-        or fractions.size == 0
-        or not np.all(np.isfinite(fractions))
-        or np.any(fractions <= 0.0)
-        or np.any(fractions > 1.0)
-        or np.any(np.diff(fractions) <= 0.0)
-        or fractions[-1] != 1.0
-    ):
-        raise ValueError("fractions must be increasing values in (0, 1] ending at 1")
-    if not tasks:
-        raise ValueError("task protocol is empty")
-    if len(seeds) < 2 or len(set(seeds)) != len(seeds):
-        raise ValueError("expected seeds must contain at least two unique values")
-
-    logs, timing, optimizers = _validate_matrix(logs, timing, tasks, seeds)
-
-    # CARP-S normalizes each task over the results being compared. Recomputing
-    # from raw costs means a later optimizer configuration needs analysis only.
-    task_groups = logs.groupby("task_id")["trial_value__cost"]
-    task_min = task_groups.transform("min")
-    task_range = task_groups.transform("max") - task_min
-    logs["normalized_cost"] = (logs["trial_value__cost"] - task_min) / (
-        task_range + _NORMALIZATION_EPSILON
-    )
-    logs["incumbent"] = logs.groupby(_RUN_KEYS, sort=False)["normalized_cost"].cummin()
-    timing["optimizer_seconds"] = timing["ask_seconds"] + timing["tell_seconds"]
-    timing["optimizer_seconds"] = timing.groupby(_RUN_KEYS, sort=False)[
-        "optimizer_seconds"
-    ].cumsum()
-
-    n_steps = fractions.size
-    n_optimizers = len(optimizers)
-    quality = np.empty((n_steps, n_optimizers))
-    quality_lower = np.empty_like(quality)
-    quality_upper = np.empty_like(quality)
-    quality_repeats = np.empty((n_steps, len(seeds), n_optimizers))
-    optimizer_seconds = np.empty_like(quality)
-
-    for optimizer_index, optimizer in enumerate(optimizers):
-        quality_samples: list[np.ndarray] = []
-        timing_samples: list[np.ndarray] = []
-        optimizer_logs = logs[logs["optimizer_id"] == optimizer]
-        optimizer_timing = timing[timing["optimizer_id"] == optimizer]
-        for task in tasks:
-            task_id = task.task_id
-            budget = task.n_trials
-            indices = np.ceil(fractions * budget).astype(int) - 1
-            for seed in seeds:
-                run_selector = (optimizer_logs["task_id"] == task_id) & (
-                    optimizer_logs["seed"] == seed
-                )
-                timing_selector = (optimizer_timing["task_id"] == task_id) & (
-                    optimizer_timing["seed"] == seed
-                )
-                quality_samples.append(
-                    optimizer_logs.loc[run_selector, "incumbent"].to_numpy()[indices]
-                )
-                timing_samples.append(
-                    optimizer_timing.loc[timing_selector, "optimizer_seconds"].to_numpy()[indices]
-                )
-
-        quality_array = np.asarray(quality_samples).reshape(len(tasks), len(seeds), n_steps)
-        timing_array = np.asarray(timing_samples)
-        quality_by_seed = quality_array.mean(axis=0)
-        quality_repeats[:, :, optimizer_index] = quality_by_seed.T
-        quality[:, optimizer_index] = quality_by_seed.mean(axis=0)
-        standard_error = quality_by_seed.std(axis=0, ddof=1) / np.sqrt(len(seeds))
-        quality_lower[:, optimizer_index] = quality[:, optimizer_index] - 1.96 * standard_error
-        quality_upper[:, optimizer_index] = quality[:, optimizer_index] + 1.96 * standard_error
-        optimizer_seconds[:, optimizer_index] = timing_array.mean(axis=0)
-
-    return Curves(
-        fractions=fractions,
-        optimizers=optimizers,
-        quality=quality,
-        quality_lower=quality_lower,
-        quality_upper=quality_upper,
-        quality_repeats=quality_repeats,
-        optimizer_seconds=optimizer_seconds,
-        runs_per_optimizer=len(tasks) * len(seeds),
-    )
-
-
-def render_table(curves: Curves, reference: str) -> str:
-    try:
-        reference_index = curves.optimizers.index(reference)
-    except ValueError as error:
-        raise ValueError(f"reference optimizer {reference!r} is not present") from error
-
-    reference_quality = curves.quality_repeats[-1, :, reference_index]
-    reference_seconds = curves.optimizer_seconds[-1, reference_index]
+    curves = pd.DataFrame(records)
+    if reference not in curves.optimizer.unique():
+        raise ValueError(f"Unknown reference optimizer: {reference}")
+    comparisons = []
+    for (task, fraction), group in curves.groupby(["task", "fraction"]):
+        costs = group.pivot(index="seed", columns="optimizer", values="cost")
+        baseline = costs[reference].to_numpy()
+        for optimizer in costs.columns:
+            own = costs[optimizer].to_numpy()[:, None]
+            probability = np.mean(own < baseline) + 0.5 * np.mean(own == baseline)
+            comparisons.append((task, fraction, optimizer, probability))
+    probabilities = pd.DataFrame(
+        comparisons, columns=["task", "fraction", "optimizer", "probability"]
+    ).pivot(index=["task", "fraction"], columns="optimizer", values="probability")
+    aggregate = probabilities.groupby("fraction").mean()
+    final = curves[curves.fraction == 1.0]
+    times = final.pivot(index=["task", "seed"], columns="optimizer", values="seconds")
     rows = [
-        f"| Optimizer | Final normalized cost | Delta vs {reference} (95% CI) | Optimizer s | "
-        f"Speed ratio ({reference}/optimizer) | Failures |",
+        "# Optimizer comparison",
+        "",
+        f"Win probability compares every optimizer run with every {reference} run on the same "
+        "task, counts ties as half, then averages tasks equally. 50% is neutral. "
+        "Anytime probability averages 20 budget fractions from 5% to 100%. "
+        "This measures how often an optimizer wins; task costs show the size of the differences.",
+        "",
+        "Failed runs retain their best evaluated cost for the remaining budget. "
+        "Timing uses only task/seed pairs completed by every compared optimizer. "
+        "Intervals in task plots are interquartile ranges, not confidence intervals.",
+        "",
+        f"| Optimizer | Final win vs {reference} | Anytime win vs {reference} | "
+        "Median ask + tell (s) | "
+        f"{reference}/optimizer | Failed runs |",
         "|---|---:|---:|---:|---:|---:|",
     ]
-    for index, optimizer in enumerate(curves.optimizers):
-        delta_samples = curves.quality_repeats[-1, :, index] - reference_quality
-        delta = delta_samples.mean()
-        delta_half_width = 1.96 * delta_samples.std(ddof=1) / np.sqrt(delta_samples.size)
-        seconds = curves.optimizer_seconds[-1, index]
-        ratio = reference_seconds / seconds if seconds > 0.0 else np.inf
-        ratio_text = f"{ratio:.2f}x" if np.isfinite(ratio) else "inf"
+    for optimizer in probabilities.columns:
+        own = [r for r in runs if r.optimizer == optimizer]
+        seconds = times[optimizer].median()
+        ratios = times[reference] / times[optimizer]
+        speed = ratios.median()
         rows.append(
-            f"| {optimizer} | {curves.quality[-1, index]:.4f} | "
-            f"{delta:+.4f} [{delta - delta_half_width:+.4f}, "
-            f"{delta + delta_half_width:+.4f}] | {seconds:.2f} | "
-            f"{ratio_text} | 0 |"
+            f"| {optimizer} | {aggregate[optimizer].iloc[-1]:.1%} | "
+            f"{aggregate[optimizer].mean():.1%} | "
+            f"{seconds:.2f} | {speed:.2f}x | {sum(r.failed for r in own)}/{len(own)} |"
         )
-    return "\n".join(rows)
+    rows.extend(
+        [
+            "",
+            "![Aggregate quality and optimizer time](comparison.png)",
+            "",
+            "![Per-task incumbent quality](tasks.png)",
+            "",
+            f"| Task | Optimizer | Median final cost | Median paired delta vs {reference} |",
+            "|---|---|---:|---:|",
+        ]
+    )
+    for task, group in final.groupby("task", sort=False):
+        costs = group.pivot(index="seed", columns="optimizer", values="cost")
+        for optimizer in probabilities.columns:
+            rows.append(
+                f"| {task} | {optimizer} | {costs[optimizer].median():.7g} | "
+                f"{(costs[optimizer] - costs[reference]).median():+.7g} |"
+            )
+    return curves, probabilities, "\n".join(rows) + "\n"
 
 
-def plot_curves(curves: Curves, output: Path) -> None:
+def plot_curves(
+    runs: list[Run], curves: pd.DataFrame, probabilities: pd.DataFrame, reference: str, output: Path
+) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import PercentFormatter
 
-    budget_percent = curves.fractions * 100.0
-    figure, (quality_axis, time_axis) = plt.subplots(1, 2, figsize=(10, 4))
-    for index, optimizer in enumerate(curves.optimizers):
-        (line,) = quality_axis.plot(budget_percent, curves.quality[:, index], label=optimizer)
-        quality_axis.fill_between(
-            budget_percent,
-            curves.quality_lower[:, index],
-            curves.quality_upper[:, index],
-            color=line.get_color(),
-            alpha=0.15,
-        )
-        time_axis.plot(
-            budget_percent,
-            curves.optimizer_seconds[:, index],
-            color=line.get_color(),
-            label=optimizer,
-        )
-
-    quality_axis.set_title("Optimization quality")
-    quality_axis.set_xlabel("Task budget used (%)")
-    quality_axis.set_ylabel("Mean normalized incumbent cost (lower is better; 95% CI)")
-    quality_axis.grid(alpha=0.25)
-    quality_axis.legend()
-
-    time_axis.set_title("Optimizer time")
-    time_axis.set_xlabel("Task budget used (%)")
-    time_axis.set_ylabel("Mean cumulative ask + tell (s)")
-    time_axis.grid(alpha=0.25)
-
+    tasks = list(dict.fromkeys(run.task for run in runs))
+    aggregate = probabilities.groupby("fraction").mean()
+    final = probabilities.xs(1.0, level="fraction").reindex(tasks)
+    figure, axes = plt.subplots(1, 3, figsize=(16, max(4.5, 0.3 * len(tasks) + 1)))
+    colors = {optimizer: f"C{i}" for i, optimizer in enumerate(probabilities.columns)}
+    for optimizer in probabilities.columns:
+        color = colors[optimizer]
+        if optimizer != reference:
+            axes[0].plot(100 * aggregate.index, aggregate[optimizer], color=color, label=optimizer)
+            axes[0].annotate(
+                f"{aggregate[optimizer].iloc[-1]:.1%}",
+                (100, aggregate[optimizer].iloc[-1]),
+                xytext=(-4, 10),
+                textcoords="offset points",
+                ha="right",
+                color=color,
+            )
+            axes[1].hlines(range(len(tasks)), 0.5, final[optimizer], color=color, alpha=0.3)
+            axes[1].scatter(final[optimizer], range(len(tasks)), color=color, s=30)
+        time = curves[curves.optimizer == optimizer].groupby("fraction")["seconds"].median()
+        axes[2].plot(100 * time.index, time, color=color, label=optimizer)
+    axes[0].axhline(0.5, color="0.55", linestyle="--", linewidth=1)
+    axes[0].set(
+        ylim=(0, 1),
+        xlim=(0, 103),
+        ylabel=f"Probability of beating {reference}",
+        xlabel="Evaluation budget used (%)",
+        title=f"Across all {len(tasks)} tasks",
+    )
+    axes[0].yaxis.set_major_formatter(PercentFormatter(1))
+    axes[1].axvline(0.5, color="0.55", linestyle="--", linewidth=1)
+    axes[1].set(
+        xlim=(0, 1),
+        yticks=range(len(tasks)),
+        yticklabels=[t.removeprefix("yahpo/").removesuffix("/None") for t in tasks],
+        xlabel=f"Probability of beating {reference}",
+        title="Each task at the full budget",
+    )
+    axes[1].invert_yaxis()
+    axes[1].xaxis.set_major_formatter(PercentFormatter(1))
+    axes[2].set(
+        xlabel="Evaluation budget used (%)",
+        ylabel="Median cumulative ask + tell (s)",
+        title="Optimizer time",
+    )
+    axes[2].legend(fontsize=8)
+    for axis in axes:
+        axis.spines[["top", "right"]].set_visible(False)
+        axis.grid(alpha=0.15)
     figure.tight_layout()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output, dpi=160)
+    figure.savefig(output / "comparison.png", dpi=180)
+    plt.close(figure)
+
+    columns = min(3, len(tasks))
+    figure, axes = plt.subplots(
+        int(np.ceil(len(tasks) / columns)),
+        columns,
+        figsize=(4.5 * columns, 3 * np.ceil(len(tasks) / columns)),
+        squeeze=False,
+    )
+    for axis, task in zip(axes.flat, tasks, strict=False):
+        optimum = next(r.optimum for r in runs if r.task == task)
+        for optimizer in probabilities.columns:
+            selected = curves[(curves.task == task) & (curves.optimizer == optimizer)]
+            values = selected.pivot(index="fraction", columns="seed", values="cost")
+            if optimum is not None:
+                values = (values - optimum).clip(lower=1e-12)
+            axis.plot(
+                100 * values.index, values.median(axis=1), color=colors[optimizer], label=optimizer
+            )
+            axis.fill_between(
+                100 * values.index,
+                values.quantile(0.25, axis=1),
+                values.quantile(0.75, axis=1),
+                color=colors[optimizer],
+                alpha=0.15,
+            )
+        axis.set_title(task, fontsize=9)
+        axis.set_xlabel("Budget (%)", fontsize=8)
+        axis.set_ylabel("Regret" if optimum is not None else "Incumbent cost", fontsize=8)
+        if optimum is not None:
+            axis.set_yscale("log")
+        axis.grid(alpha=0.2)
+    for axis in list(axes.flat)[len(tasks) :]:
+        axis.set_visible(False)
+    axes.flat[0].legend(fontsize=7)
+    figure.tight_layout()
+    figure.savefig(output / "tasks.png", dpi=160)
     plt.close(figure)
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Analyze a completed LeanHEBO CARP-S comparison")
-    parser.add_argument("--logs", type=Path, required=True, help="CARP-S logs.parquet")
-    parser.add_argument(
-        "--runs",
-        type=Path,
-        required=True,
-        help="CARP-S run directory containing optimizer_timing.jsonl files",
-    )
-    parser.add_argument(
-        "--tasks",
-        type=Path,
-        default=Path(__file__).with_name("tasks.json"),
-        help="pinned CARP-S task protocol",
-    )
-    parser.add_argument("--reference", default="HEBO")
-    parser.add_argument("--output", type=Path, default=Path("carps.png"))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--runs", type=Path, nargs="+", required=True)
+    parser.add_argument("--reference", help="reference optimizer for paired differences and speed")
+    parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-
-    if args.output.suffix.lower() != ".png":
-        raise ValueError("--output must be a .png file")
-
-    logs = pd.read_parquet(args.logs)
-    timing = read_timing_jsonl(args.runs)
-    curves = extract_curves(logs, timing, load_tasks(args.tasks))
-    plot_curves(curves, args.output.resolve())
-
-    print(
-        f"Validated {len(curves.optimizers) * curves.runs_per_optimizer} completed runs; "
-        "failed trials: 0.\n"
-    )
-    print(render_table(curves, args.reference))
-    print(f"\nFigure: {args.output.resolve()}")
+    runs = load_runs(args.runs)
+    reference = args.reference or runs[0].optimizer
+    curves, probabilities, report = summarize(runs, reference)
+    args.output.mkdir(parents=True, exist_ok=True)
+    plot_curves(runs, curves, probabilities, reference, args.output)
+    (args.output / "report.md").write_text(report, encoding="utf-8")
+    print(f"{len(runs)} runs, {sum(r.failed for r in runs)} failed; {args.output / 'report.md'}")
 
 
 if __name__ == "__main__":

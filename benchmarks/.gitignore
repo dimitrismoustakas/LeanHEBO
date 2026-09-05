@@ -1,3 +1,8 @@
 # Local benchmark inputs and generated artifacts.
 .carps/
 *.egg-info/
+
+# Keep the published comparison; other generated reports stay local.
+!results/
+results/*
+!results/hebo-comparison/

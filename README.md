@@ -131,7 +131,7 @@ modules are implementation details.
 
 The repository does not yet claim general speed or optimization-quality superiority. See the
 [benchmark README](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/benchmarks/README.md)
-for the planned CARP-S comparison.
+for the existing HEBO comparison and commands for new CARP-S runs.
 
 ## Development
 

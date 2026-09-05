@@ -10,6 +10,7 @@ import torch
 from carps.optimizers.hebo import HEBOOptimizer
 from carps.utils.trials import TrialInfo
 from hebo.optimizers.hebo import HEBO
+from omegaconf import OmegaConf
 
 if TYPE_CHECKING:
     from carps.loggers.abstract_logger import AbstractLogger
@@ -37,6 +38,7 @@ class UpstreamHEBOOptimizer(HEBOOptimizer):
             expects_multiple_objectives=expects_multiple_objectives,
             expects_fidelities=expects_fidelities,
         )
+        self.hebo_cfg = OmegaConf.to_container(OmegaConf.create(self.hebo_cfg), resolve=True)
 
     def _setup_optimizer(self) -> HEBO:
         np.random.seed(self._seed)

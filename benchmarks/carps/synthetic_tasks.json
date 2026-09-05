@@ -1,0 +1,7 @@
+[
+  {"name": "synthetic/activation", "n_trials": 60},
+  {"name": "synthetic/shared_root", "n_trials": 60},
+  {"name": "synthetic/wide_exclusive", "n_trials": 60},
+  {"name": "synthetic/threshold", "n_trials": 60},
+  {"name": "synthetic/mixed", "n_trials": 60}
+]
