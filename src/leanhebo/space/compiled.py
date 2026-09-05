@@ -631,6 +631,29 @@ class CompiledSpace:
             categorical[:, indices] = values
         return EncodedBatch(continuous, categorical)
 
+    def matches_fixed_continuous(self, continuous: torch.Tensor, fixed: FixedInput) -> torch.Tensor:
+        """Match encoded coordinates and exact public values of logarithmic floats.
+
+        CandidateBatch retains the original encoded coordinate when decoding it.
+        Encoding that public log value again can change the last bits, so either
+        exact representation establishes a match. Nearby distinct values are not
+        made eligible by a numerical tolerance.
+        """
+        indices = fixed.continuous_indices.to(continuous.device)
+        values = fixed.continuous_values.to(device=continuous.device, dtype=continuous.dtype)
+        matches = continuous[:, indices] == values
+        public_values = dict(fixed.decoded_values)
+        for column, index in enumerate(fixed.continuous_indices.tolist()):
+            parameter = self._continuous_parameters[index]
+            if isinstance(parameter, Float) and parameter.log and parameter.name in public_values:
+                decoded = parameter.decode_values(continuous[:, index])
+                matches[:, column] |= torch.tensor(
+                    [value == public_values[parameter.name] for value in decoded],
+                    dtype=torch.bool,
+                    device=continuous.device,
+                )
+        return matches
+
     def sample(
         self,
         count: int,

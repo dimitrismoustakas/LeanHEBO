@@ -381,14 +381,13 @@ class LeanHEBO:
                 parameter_activity = semantics.activity(observations.encoded).parameter
                 if fixed.continuous_indices.numel():
                     indices = fixed.continuous_indices.to(self.device)
-                    values = fixed.continuous_values.to(self.device, dtype=self.dtype)
                     parameter_indices = torch.tensor(
                         semantics.continuous_parameter_indices,
                         dtype=torch.int64,
                         device=self.device,
                     ).index_select(0, indices)
                     active = parameter_activity.index_select(1, parameter_indices)
-                    matches = observations.continuous[:, indices] == values
+                    matches = self.space.matches_fixed_continuous(observations.continuous, fixed)
                     eligible &= ((~active) | matches).all(dim=1)
                 if fixed.categorical_indices.numel():
                     indices = fixed.categorical_indices.to(self.device)
@@ -403,9 +402,9 @@ class LeanHEBO:
                     eligible &= ((~active) | matches).all(dim=1)
             else:
                 if fixed.continuous_indices.numel():
-                    indices = fixed.continuous_indices.to(self.device)
-                    values = fixed.continuous_values.to(self.device, dtype=self.dtype)
-                    eligible &= (observations.continuous[:, indices] == values).all(dim=1)
+                    eligible &= self.space.matches_fixed_continuous(
+                        observations.continuous, fixed
+                    ).all(dim=1)
                 if fixed.categorical_indices.numel():
                     indices = fixed.categorical_indices.to(self.device)
                     values = fixed.categorical_values.to(self.device)

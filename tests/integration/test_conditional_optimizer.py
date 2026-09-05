@@ -121,6 +121,48 @@ def test_contextual_incumbent_ignores_a_fixed_child_while_it_is_inactive() -> No
     assert incumbent.to_records() == [{"branch": "off", "root": pytest.approx(0.1)}]
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("conditional", [False, True])
+def test_contextual_incumbent_matches_observed_log_values_after_decoding(
+    dtype: str, conditional: bool
+) -> None:
+    parameters = [Float("log_value", 1e-6, 1e3, log=True), Float("root", 0.0, 1.0)]
+    if conditional:
+        parameters.extend(
+            [
+                Categorical("branch", ("off", "on")),
+                Float("child", 0.0, 1.0, active_when=Eq("branch", "on")),
+            ]
+        )
+    optimizer = LeanHEBO(
+        Space(*parameters),
+        config=LeanHEBOConfig(random_samples=50, runtime=RuntimeConfig(dtype=dtype, seed=31)),
+    )
+    observations = optimizer.suggest(50)
+    optimizer.observe(observations, torch.arange(50))
+    for record in observations.to_records():
+        fixed = optimizer.space.compile_fixed({"log_value": record["log_value"]})
+        assert optimizer._incumbent(fixed).to_records() == [record]
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_contextual_log_matching_does_not_admit_nearby_distinct_observations(dtype: str) -> None:
+    optimizer = LeanHEBO(
+        Space(Float("x", 1e-6, 1.0, log=True), Float("root", 0.0, 1.0)),
+        config=LeanHEBOConfig(runtime=RuntimeConfig(dtype=dtype)),
+    )
+    observations = optimizer.space.decode(
+        optimizer.space.encode([{"x": 0.01, "root": 0.0}, {"x": 0.0100001, "root": 1.0}])
+    )
+    optimizer.observe(observations, [0.0, 1.0])
+    assert torch.isclose(observations.continuous[0, 0], observations.continuous[1, 0])
+    for value in (0.0100001, observations.to_records()[1]["x"]):
+        fixed = optimizer.space.compile_fixed({"x": value})
+        incumbent = optimizer._incumbent(fixed).to_records()[0]
+        assert incumbent["root"] == 1.0
+        assert incumbent["x"] == value
+
+
 def test_conditional_checkpoint_continuation_is_exact(tmp_path: Path) -> None:
     optimizer = LeanHEBO(_xgboost_space(), config=_config(random_samples=4, seed=73))
     initial = optimizer.suggest(4)
