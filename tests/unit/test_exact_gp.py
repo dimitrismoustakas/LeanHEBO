@@ -11,6 +11,7 @@ from leanhebo.errors import NumericalError
 from leanhebo.gp import ExactGPSurrogate
 from leanhebo.gp.kernel import (
     MixedFeatureExtractor,
+    build_base_kernel,
     build_kernel,
     initialize_base_numeric_lengthscales,
 )
@@ -306,6 +307,80 @@ def test_numeric_lengthscale_uses_median_of_all_pairwise_distances() -> None:
 
     # Pairwise distances are [1, 2, 100, 1, 99, 98], whose lower median is 2.
     torch.testing.assert_close(kernel.base_kernel.lengthscale.reshape(-1), torch.tensor([2.0]))
+
+
+def _matern_reference(
+    left: torch.Tensor, right: torch.Tensor, lengthscale: torch.Tensor
+) -> torch.Tensor:
+    differences = (left.double()[:, None, :] - right.double()[None, :, :]) / lengthscale.double()
+    radius = 3**0.5 * torch.linalg.vector_norm(differences, dim=-1)
+    return (1 + radius) * torch.exp(-radius)
+
+
+@pytest.mark.parametrize("categorical", [False, True], ids=["numeric-ard", "learned-embedding"])
+def test_matern_close_point_covariance_and_gradients(categorical: bool) -> None:
+    # These nearby points exposed indefinite float32 covariances at short lengthscales.
+    # The last row also exercises the zero-distance derivative for distinct observations.
+    points = torch.tensor(
+        [
+            [0.1, 0.2],
+            [0.100001, 0.200002],
+            [0.100002, 0.200004],
+            [0.9, 0.8],
+            [0.6, 0.1],
+            [0.1, 0.2],
+        ],
+        dtype=torch.float32,
+    )
+    if categorical:
+        extractor = MixedFeatureExtractor(0, (5,)).float()
+        embedding = extractor.embeddings[0]
+        with torch.no_grad():
+            embedding.weight.zero_()
+            embedding.weight[:, :2].copy_(points[:5])
+        features = extractor(torch.empty((6, 0)), torch.tensor([[0], [1], [2], [3], [4], [0]]))
+        kernel = build_kernel(num_continuous=0, feature_extractor=extractor, ard=True).float()
+        kernel.outputscale = 1.2
+        base = kernel.base_kernel
+        scale = kernel.outputscale.double()
+        feature_parameter = embedding.weight
+    else:
+        features = points.requires_grad_()
+        kernel = build_base_kernel(
+            num_continuous=2, feature_extractor=MixedFeatureExtractor(2, ()), ard=True
+        ).float()
+        base = kernel
+        scale = 1.0
+        feature_parameter = features
+    base.lengthscale = 0.0003
+    expected = scale * _matern_reference(features, features, base.lengthscale)
+    actual = kernel(features).to_dense()
+
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual.double(), expected, rtol=1e-7, atol=1e-7)
+    assert torch.linalg.eigvalsh(actual.detach().double()).min() >= -1e-7
+    # A small noise level must suffice; the old distance arithmetic failed even with it.
+    assert torch.linalg.cholesky_ex(actual.detach() + 8e-4 * torch.eye(6)).info.item() == 0
+
+    parameters = (feature_parameter, base.raw_lengthscale)
+    actual_gradients = torch.autograd.grad(
+        actual[0, 1] + actual[0, -1], parameters, retain_graph=True
+    )
+    expected_gradients = torch.autograd.grad(expected[0, 1] + expected[0, -1], parameters)
+    for actual_gradient, expected_gradient in zip(
+        actual_gradients, expected_gradients, strict=True
+    ):
+        assert torch.isfinite(actual_gradient).all()
+        torch.testing.assert_close(actual_gradient, expected_gradient, rtol=3e-6, atol=3e-5)
+
+    # Prediction also evaluates cross covariances without an autograd graph.
+    with torch.no_grad():
+        observed = features.detach()
+        query = observed[[1, 0, -1]]
+        cross = kernel(observed, query).to_dense()
+        reference = scale * _matern_reference(observed, query, base.lengthscale)
+        torch.testing.assert_close(cross.double(), reference, rtol=1e-7, atol=1e-7)
+        torch.testing.assert_close(kernel(observed, diag=True).double(), expected.diag())
 
 
 def test_scheduled_full_refit_cadence_resets_after_each_refit() -> None:

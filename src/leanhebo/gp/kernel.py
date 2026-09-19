@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import gpytorch  # type: ignore[import-untyped]
@@ -12,6 +13,38 @@ import torch
 from torch import nn
 
 _PAIRWISE_DISTANCE_ELEMENT_BUDGET = 8_000_000
+
+
+class _MaternKernel(gpytorch.kernels.MaternKernel):  # type: ignore[misc]
+    """Matérn-3/2 with stable distances at small learned lengthscales."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(nu=1.5, **kwargs)
+
+    def forward(
+        self,
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        diag: bool = False,
+        last_dim_is_batch: bool = False,
+        **params: object,
+    ) -> torch.Tensor:
+        del params
+        # Float32 quadratic distance expansion can corrupt even self-distances.
+        # Normalize in double before direct distances to preserve nearby points.
+        lengthscale = self.lengthscale.double()
+        left = x1.double() / lengthscale
+        right = x2.double() / lengthscale
+        if last_dim_is_batch:
+            left = left.transpose(-1, -2).unsqueeze(-1)
+            right = right.transpose(-1, -2).unsqueeze(-1)
+        distance = (
+            torch.linalg.vector_norm(left - right, dim=-1)
+            if diag
+            else torch.cdist(left, right, compute_mode="donot_use_mm_for_euclid_dist")
+        )
+        scaled = math.sqrt(3) * distance
+        return ((1 + scaled) * torch.exp(-scaled)).to(dtype=x1.dtype)
 
 
 class MixedFeatureExtractor(nn.Module):
@@ -70,16 +103,14 @@ def build_base_kernel(
     components: list[gpytorch.kernels.Kernel] = []
     if num_continuous:
         components.append(
-            gpytorch.kernels.MaternKernel(
-                nu=1.5,
+            _MaternKernel(
                 ard_num_dims=num_continuous if ard else None,
                 active_dims=torch.arange(num_continuous),
             )
         )
     if feature_extractor.embedding_sizes:
         components.append(
-            gpytorch.kernels.MaternKernel(
-                nu=1.5,
+            _MaternKernel(
                 active_dims=torch.arange(num_continuous, feature_extractor.output_dimensions),
             )
         )
