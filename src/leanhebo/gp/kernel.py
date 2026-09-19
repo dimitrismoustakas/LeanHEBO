@@ -38,11 +38,25 @@ class _MaternKernel(gpytorch.kernels.MaternKernel):  # type: ignore[misc]
         if last_dim_is_batch:
             left = left.transpose(-1, -2).unsqueeze(-1)
             right = right.transpose(-1, -2).unsqueeze(-1)
-        distance = (
-            torch.linalg.vector_norm(left - right, dim=-1)
-            if diag
-            else torch.cdist(left, right, compute_mode="donot_use_mm_for_euclid_dist")
-        )
+        distance: torch.Tensor
+        if diag:
+            distance = torch.linalg.vector_norm(left - right, dim=-1)
+        elif left.is_cuda and not torch.is_grad_enabled():
+            # Direct CUDA cdist is slow for the small feature blocks used here.
+            # Bound the broadcast temporary; training retains cdist's lean backward.
+            batch_shape = torch.broadcast_shapes(  # type: ignore[no-untyped-call]
+                left.shape[:-2], right.shape[:-2]
+            )
+            batch_size = math.prod(batch_shape)
+            elements_per_row = batch_size * right.shape[-2] * left.shape[-1]
+            chunk_rows = max(1, _PAIRWISE_DISTANCE_ELEMENT_BUDGET // max(1, elements_per_row))
+            chunks = [
+                torch.linalg.vector_norm(chunk.unsqueeze(-2) - right.unsqueeze(-3), dim=-1)
+                for chunk in left.split(chunk_rows, dim=-2)
+            ]
+            distance = chunks[0] if len(chunks) == 1 else torch.cat(chunks, dim=-2)
+        else:
+            distance = torch.cdist(left, right, compute_mode="donot_use_mm_for_euclid_dist")
         scaled = math.sqrt(3) * distance
         return ((1 + scaled) * torch.exp(-scaled)).to(dtype=x1.dtype)
 

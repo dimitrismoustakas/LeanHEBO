@@ -7,8 +7,6 @@ import math
 import gpytorch
 import pytest
 import torch
-from gpytorch.lazy import LazyEvaluatedKernelTensor
-from linear_operator.operators import DenseLinearOperator
 
 from leanhebo.config import GPConfig, RuntimeConfig
 from leanhebo.data import EncodedBatch
@@ -61,20 +59,52 @@ def test_layout_requires_an_exact_partition() -> None:
         layout.validate(num_continuous=2, num_categorical=0)
 
 
-def test_conditional_gp_eagerly_evaluates_its_dense_kernel() -> None:
-    surrogate = _surrogate(_branch_space())
-    layout = ConditionalKernelLayout((0,), (), (ActivityGroupSpec((1,), ()),))
-    kernel = ActivityFactorizedProductKernel(category_sizes=(), layout=layout, ard=True)
-    continuous = torch.tensor([[0.1, 0.2], [0.3, 0.4]])
-    categorical = torch.empty((2, 0), dtype=torch.int64)
-    activity = torch.tensor([[False], [True]])
-    packed = kernel.pack_inputs(continuous, categorical, activity)
+def test_warm_conditional_prediction_avoids_joint_covariance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    space = _branch_space()
+    surrogate = _surrogate(space)
+    train = space.encode(
+        [
+            {"kind": "plain", "root": 0.0},
+            {"kind": "plain", "root": 1.0},
+            {"kind": "branch", "root": 0.3, "child": 0.2},
+            {"kind": "branch", "root": 0.7, "child": 0.8},
+        ]
+    )
+    query = space.encode(
+        [
+            {"kind": "plain", "root": 0.2},
+            {"kind": "branch", "root": 0.4, "child": 0.3},
+            {"kind": "branch", "root": 0.8, "child": 0.6},
+        ]
+    )
+    targets = torch.tensor([1.0, 1.2, 0.4, 0.1], dtype=torch.float64)
+    surrogate.fit(train.continuous, train.categorical, targets, transform_version=0)
+    surrogate.predict(query.continuous, query.categorical)  # Populate training caches.
+    with gpytorch.settings.lazily_evaluate_kernels(False):
+        expected = surrogate.predict(query.continuous, query.categorical)
 
+    assert surrogate.model is not None
+    kernel = surrogate.model.covar_module.base_kernel
+    original_forward = kernel.forward
+    shapes: list[tuple[int, int]] = []
+
+    def record_forward(x1: torch.Tensor, x2: torch.Tensor, **params: object) -> torch.Tensor:
+        if not params.get("diag", False):
+            shapes.append((x1.shape[-2], x2.shape[-2]))
+        return original_forward(x1, x2, **params)
+
+    monkeypatch.setattr(kernel, "forward", record_forward)
     with gpytorch.settings.lazily_evaluate_kernels(True):
-        assert isinstance(kernel(packed, packed), LazyEvaluatedKernelTensor)
-        with surrogate._settings():
-            assert isinstance(kernel(packed, packed), DenseLinearOperator)
-        assert gpytorch.settings.lazily_evaluate_kernels.on()
+        actual = surrogate.predict(query.continuous, query.categorical)
+
+    train_count, joint_count = len(train.continuous), len(train.continuous) + len(query.continuous)
+    assert shapes
+    assert (train_count, train_count) not in shapes
+    assert (joint_count, joint_count) not in shapes
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_tensor, expected_tensor, rtol=0.0, atol=0.0)
 
 
 def test_activity_kernel_batch_shape_does_not_traverse_feature_blocks(

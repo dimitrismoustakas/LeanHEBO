@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from contextlib import ExitStack
 from typing import Any, cast
 
 import gpytorch  # type: ignore[import-untyped]
@@ -259,11 +258,6 @@ class ConditionalExactGPSurrogate(ExactGPSurrogate):
     @property
     def masked_input_scaler(self) -> _MaskedMinMaxScaler:
         return cast(_MaskedMinMaxScaler, self.input_scaler)
-
-    def _settings(self) -> ExitStack:
-        stack = super()._settings()
-        stack.enter_context(gpytorch.settings.lazily_evaluate_kernels(False))
-        return stack
 
     def _derive_activity(
         self,

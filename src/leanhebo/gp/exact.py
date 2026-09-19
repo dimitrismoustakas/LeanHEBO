@@ -460,19 +460,39 @@ class ExactGPSurrogate:
         if self.diagnostics is not None:
             self.diagnostics.increment("posterior.calls")
             self.diagnostics.increment("posterior.candidates", inputs[0].shape[0])
+        assert self.train_targets is not None
+        # Only marginal statistics are returned. Bound query/query covariance work
+        # without splitting ordinary small requests below GPyTorch's eager threshold.
+        train_count = self.train_targets.numel()
+        eager_size = gpytorch.settings.max_eager_kernel_size.value()
+        chunk_size = max(train_count, eager_size)
+        means: list[torch.Tensor] = []
+        variances: list[torch.Tensor] = []
         with (
             self._settings(),
             gpytorch.settings.fast_pred_var(self.config.fast_pred_var),
+            ExitStack() as stack,
         ):
-            if self.config.eval_cg_tolerance is None:
-                distribution = self.model(*inputs)
-            else:
-                with gpytorch.settings.eval_cg_tolerance(self.config.eval_cg_tolerance):
-                    distribution = self.model(*inputs)
-            if self.config.predict_observation_noise:
-                distribution = self.likelihood(distribution)
-        mean = distribution.mean.reshape(-1)
-        variance = distribution.variance.reshape(-1).clamp_min(torch.finfo(self.dtype).eps)
+            if self.config.eval_cg_tolerance is not None:
+                stack.enter_context(
+                    gpytorch.settings.eval_cg_tolerance(self.config.eval_cg_tolerance)
+                )
+            # Preserve the model's empty-posterior path for an empty query batch.
+            for start in range(0, max(1, inputs[0].shape[0]), chunk_size):
+                chunk = tuple(value[start : start + chunk_size] for value in inputs)
+                if self.device.type == "cuda" and train_count + chunk[0].shape[0] <= eager_size:
+                    # A single small joint evaluation avoids duplicate CUDA launches.
+                    with gpytorch.settings.lazily_evaluate_kernels(False):
+                        distribution = self.model(*chunk)
+                else:
+                    distribution = self.model(*chunk)
+                if self.config.predict_observation_noise:
+                    distribution = self.likelihood(distribution)
+                means.append(distribution.mean.reshape(-1))
+                variances.append(distribution.variance.reshape(-1))
+        mean = means[0] if len(means) == 1 else torch.cat(means)
+        variance = variances[0] if len(variances) == 1 else torch.cat(variances)
+        variance = variance.clamp_min(torch.finfo(self.dtype).eps)
         if validate and (not torch.isfinite(mean).all() or not torch.isfinite(variance).all()):
             raise NumericalError("exact-GP posterior contains non-finite values")
         return mean, variance, self.noise_variance

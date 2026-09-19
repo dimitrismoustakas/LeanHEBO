@@ -79,6 +79,75 @@ def test_adam_fits_and_predicts() -> None:
     assert noise > 0
 
 
+@pytest.mark.parametrize("fast_pred_var", [False, True])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=[
+                pytest.mark.gpu,
+                pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable"),
+            ],
+        ),
+    ],
+)
+def test_chunked_prediction_matches_full_marginals(
+    fast_pred_var: bool, device: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gp = ExactGPSurrogate(
+        num_continuous=1,
+        category_sizes=(2,),
+        config=GPConfig(
+            initial_steps=0, fast_pred_var=fast_pred_var, predict_observation_noise=True
+        ),
+        runtime=RuntimeConfig(seed=4, device=device),
+        generator=make_generator(device, 4),
+    )
+    gp.fit(
+        torch.tensor([[10.0], [20.0], [30.0], [40.0]]),
+        torch.tensor([[0], [1], [0], [1]]),
+        torch.tensor([0.0, 0.8, -0.2, 0.4]),
+        transform_version=1,
+    )
+    assert gp.model is not None and gp.likelihood is not None
+    # Unsorted queries and alternating categories expose reordering or misaligned chunks.
+    query = torch.tensor([[18.0], [42.0], [11.0], [35.0], [23.0], [7.0], [29.0], [16.0], [38.0]])
+    categories = torch.tensor([[1], [0], [0], [1], [1], [0], [0], [1], [0]])
+    # The normal threshold exercises eager small CUDA prediction before forcing chunks.
+    normal_mean, normal_variance, normal_noise = gp.predict(query, categories)
+    assert normal_mean.device.type == device
+    forward_sizes: list[int] = []
+    forward = gp.model.forward
+
+    def tracked_forward(*inputs: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
+        forward_sizes.append(inputs[0].shape[0])
+        return forward(*inputs)
+
+    with gpytorch.settings.max_eager_kernel_size(2):
+        with monkeypatch.context() as context:
+            context.setattr(gp.model, "forward", tracked_forward)
+            mean, variance, noise = gp.predict(query, categories)
+        # Four training rows set the minimum chunk size: 4 + 4 + 1 query rows.
+        assert len(forward_sizes) >= 3
+        assert max(forward_sizes) <= 4 + 4
+        with torch.inference_mode(), gp._settings(), gpytorch.settings.fast_pred_var(fast_pred_var):
+            inputs = gp._prepare_prediction_inputs(query, categories, validate=True)
+            full = gp.likelihood(gp.model(*inputs))
+            expected_mean = full.mean
+            expected_variance = full.variance.clamp_min(torch.finfo(gp.dtype).eps)
+        torch.testing.assert_close(mean, expected_mean)
+        torch.testing.assert_close(variance, expected_variance)
+        torch.testing.assert_close(noise, gp.likelihood.noise.reshape(()))
+        torch.testing.assert_close(normal_mean, mean)
+        torch.testing.assert_close(normal_variance, variance)
+        torch.testing.assert_close(normal_noise, noise)
+        empty_mean, empty_variance, empty_noise = gp.predict(query[:0], categories[:0])
+        assert empty_mean.shape == empty_variance.shape == (0,)
+        torch.testing.assert_close(empty_noise, noise)
+
+
 def test_gp_fit_failure_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     gp = _surrogate()
     continuous = torch.tensor([[0.0], [0.5], [1.0]])
@@ -318,7 +387,22 @@ def _matern_reference(
 
 
 @pytest.mark.parametrize("categorical", [False, True], ids=["numeric-ard", "learned-embedding"])
-def test_matern_close_point_covariance_and_gradients(categorical: bool) -> None:
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=[
+                pytest.mark.gpu,
+                pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable"),
+            ],
+        ),
+    ],
+)
+def test_matern_close_point_covariance_and_gradients(
+    categorical: bool, device: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # These nearby points exposed indefinite float32 covariances at short lengthscales.
     # The last row also exercises the zero-distance derivative for distinct observations.
     points = torch.tensor(
@@ -331,15 +415,20 @@ def test_matern_close_point_covariance_and_gradients(categorical: bool) -> None:
             [0.1, 0.2],
         ],
         dtype=torch.float32,
+        device=device,
     )
     if categorical:
-        extractor = MixedFeatureExtractor(0, (5,)).float()
+        extractor = MixedFeatureExtractor(0, (5,)).to(device=device, dtype=torch.float32)
         embedding = extractor.embeddings[0]
         with torch.no_grad():
             embedding.weight.zero_()
             embedding.weight[:, :2].copy_(points[:5])
-        features = extractor(torch.empty((6, 0)), torch.tensor([[0], [1], [2], [3], [4], [0]]))
-        kernel = build_kernel(num_continuous=0, feature_extractor=extractor, ard=True).float()
+        features = extractor(
+            points.new_empty((6, 0)), torch.tensor([[0], [1], [2], [3], [4], [0]], device=device)
+        )
+        kernel = build_kernel(num_continuous=0, feature_extractor=extractor, ard=True).to(
+            device=device, dtype=torch.float32
+        )
         kernel.outputscale = 1.2
         base = kernel.base_kernel
         scale = kernel.outputscale.double()
@@ -348,7 +437,7 @@ def test_matern_close_point_covariance_and_gradients(categorical: bool) -> None:
         features = points.requires_grad_()
         kernel = build_base_kernel(
             num_continuous=2, feature_extractor=MixedFeatureExtractor(2, ()), ard=True
-        ).float()
+        ).to(device=device, dtype=torch.float32)
         base = kernel
         scale = 1.0
         feature_parameter = features
@@ -360,7 +449,8 @@ def test_matern_close_point_covariance_and_gradients(categorical: bool) -> None:
     torch.testing.assert_close(actual.double(), expected, rtol=1e-7, atol=1e-7)
     assert torch.linalg.eigvalsh(actual.detach().double()).min() >= -1e-7
     # A small noise level must suffice; the old distance arithmetic failed even with it.
-    assert torch.linalg.cholesky_ex(actual.detach() + 8e-4 * torch.eye(6)).info.item() == 0
+    noisy = actual.detach() + 8e-4 * torch.eye(6, device=device)
+    assert torch.linalg.cholesky_ex(noisy).info.item() == 0
 
     parameters = (feature_parameter, base.raw_lengthscale)
     actual_gradients = torch.autograd.grad(
@@ -377,6 +467,11 @@ def test_matern_close_point_covariance_and_gradients(categorical: bool) -> None:
     with torch.no_grad():
         observed = features.detach()
         query = observed[[1, 0, -1]]
+        if device == "cuda":
+            # Fit only two left rows per temporary, forcing three prediction chunks.
+            monkeypatch.setattr(
+                "leanhebo.gp.kernel._PAIRWISE_DISTANCE_ELEMENT_BUDGET", 2 * query.numel()
+            )
         cross = kernel(observed, query).to_dense()
         reference = scale * _matern_reference(observed, query, base.lengthscale)
         torch.testing.assert_close(cross.double(), reference, rtol=1e-7, atol=1e-7)
