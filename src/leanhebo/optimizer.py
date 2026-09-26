@@ -14,7 +14,7 @@ from typing import Any, Self
 
 import torch
 
-from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator, PosteriorStats
+from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator
 from leanhebo.checkpoint import load_checkpoint, save_checkpoint
 from leanhebo.config import LeanHEBOConfig
 from leanhebo.data import CandidateBatch, EncodedBatch
@@ -361,9 +361,8 @@ class LeanHEBO:
         candidates = candidates.select(self.store.unique_mask(candidates))
         if len(candidates):
             with self.diagnostics.phase("suggest.selection"):
-                stats = posterior.evaluate(candidates.continuous, candidates.categorical)
                 selected_indices = self._selection_indices(
-                    stats, min(n_suggestions, len(candidates))
+                    candidates, min(n_suggestions, len(candidates)), posterior
                 )
                 selected = self.space.decode(candidates.select(selected_indices), fixed=fixed)
         else:
@@ -457,23 +456,30 @@ class LeanHEBO:
             fixed_values=fixed_values,
         )
 
-    def _selection_indices(self, stats: PosteriorStats, count: int) -> torch.Tensor:
-        population = stats.mean.numel()
+    def _selection_indices(
+        self, candidates: EncodedBatch, count: int, posterior: PosteriorEvaluator
+    ) -> torch.Tensor:
+        population = len(candidates)
         if count < 1 or count > population:
             raise ValueError("invalid candidate selection count")
+        stats = (
+            posterior.evaluate(candidates.continuous, candidates.categorical) if count > 2 else None
+        )
         random_order = torch.randperm(
             population,
-            device=stats.mean.device,
+            device=candidates.continuous.device,
             generator=self.random.selection,
         ).tolist()
         selected: list[int] = []
-        if count > 2:
+        if stats is not None:
             selected.append(int(stats.stddev.argmax().item()))
             best_mean = int(stats.mean.argmin().item())
             if best_mean not in selected:
                 selected.append(best_mean)
         selected.extend(index for index in random_order if index not in selected)
-        return torch.tensor(selected[:count], device=stats.mean.device, dtype=torch.int64)
+        return torch.tensor(
+            selected[:count], device=candidates.continuous.device, dtype=torch.int64
+        )
 
     def _fill_unique(
         self,

@@ -269,7 +269,7 @@ def test_integrated_mace_evaluates_each_candidate_chunk_once(
     optimizer.suggest(2, fix_input={"kind": "b", "enabled": True})
 
     assert optimizer.surrogate is not None
-    assert len(events) >= optimizer.config.search.generations + 2
+    assert len(events) == optimizer.config.search.generations + 2
     assert events[0] == (1, 1)  # contextual incumbent
     search_events = events[1 : optimizer.config.search.generations + 2]
     assert [count for count, _ in search_events] == [4, 4]

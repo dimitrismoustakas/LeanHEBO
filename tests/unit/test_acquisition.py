@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import math
+
+import pytest
 import torch
+from scipy.integrate import quad
+from scipy.special import log_ndtr, ndtr
 
 from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator, PosteriorStats
 
@@ -107,3 +112,131 @@ def test_mace_deterministic_mode_does_not_advance_generator() -> None:
     result = mace(torch.tensor([[0.0], [1.0]]), torch.empty((2, 0), dtype=torch.long))
     assert torch.equal(before, generator.get_state())
     assert torch.isfinite(result).all()
+
+
+def _reference_log_ei(normalized: float, stddev: float) -> float:
+    if normalized >= -1.0:
+        density = math.exp(-0.5 * normalized**2) / math.sqrt(2.0 * math.pi)
+        return math.log(stddev) + math.log(density + normalized * ndtr(normalized))
+    # Integrate the positive EI density directly after scaling its tail to unit width.
+    # This avoids subtracting Phi from phi and is independent of the erfcx implementation.
+    magnitude = -normalized
+    integral, _ = quad(
+        lambda value: value * math.exp(-value - 0.5 * (value / magnitude) ** 2),
+        0.0,
+        math.inf,
+        epsabs=1e-13,
+        epsrel=1e-13,
+    )
+    return (
+        math.log(stddev)
+        - 0.5 * normalized**2
+        - 0.5 * math.log(2.0 * math.pi)
+        - 2.0 * math.log(magnitude)
+        + math.log(integral)
+    )
+
+
+def _deterministic_mace(normalized: torch.Tensor, stddev: torch.Tensor) -> torch.Tensor:
+    evaluator = MACEEvaluator(
+        PosteriorEvaluator(_CountingPosterior()),
+        best_y=0.0,
+        kappa=2.0,
+        epsilon=0.0,
+        stochastic=False,
+    )
+    return evaluator.from_stats(
+        PosteriorStats(
+            mean=-normalized * stddev,
+            variance=stddev.square(),
+            stddev=stddev,
+            noise_variance=normalized.new_zeros(()),
+        )
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=[
+                pytest.mark.gpu,
+                pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable"),
+            ],
+        ),
+    ],
+)
+def test_mace_log_improvement_matches_tail_integral_and_scipy(
+    dtype: torch.dtype, device: str
+) -> None:
+    normalized = torch.tensor(
+        [
+            -1e8,
+            -1.001e6,
+            -1e6,
+            -0.999e6,
+            -1001.0,
+            -1000.0,
+            -999.0,
+            -100.0,
+            -20.0,
+            -10.0,
+            -6.001,
+            -6.0,
+            -5.999,
+            -5.0,
+            -4.501,
+            -4.5,
+            -2.0,
+            -1.00001,
+            -1.0,
+            -0.99999,
+            0.0,
+            1.0,
+            5.0,
+            20.0,
+            1e8,
+        ],
+        dtype=dtype,
+        device=device,
+    ).repeat(3)
+    stddev = normalized.new_tensor([0.125, 1.0, 8.0]).repeat_interleave(normalized.numel() // 3)
+    actual = _deterministic_mace(normalized, stddev)
+    values = normalized.cpu().tolist()
+    scales = stddev.cpu().tolist()
+    expected = torch.tensor(
+        [
+            [-_reference_log_ei(value, scale), -float(log_ndtr(value))]
+            for value, scale in zip(values, scales, strict=True)
+        ],
+        dtype=torch.float64,
+        device=device,
+    )
+    tolerance = 5e-7 if dtype == torch.float32 else 5e-13
+    torch.testing.assert_close(actual[:, 1:].double(), expected, rtol=tolerance, atol=tolerance * 4)
+    torch.testing.assert_close(actual[:, 0], -normalized * stddev - 2.0 * stddev)
+    assert actual.dtype == dtype and actual.device == normalized.device
+    assert torch.isfinite(actual).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_mace_improvement_objectives_are_monotone_across_tail_transitions(
+    dtype: torch.dtype,
+) -> None:
+    tail_bound = 1e6 if dtype == torch.float64 else 1e3
+    normalized = torch.cat(
+        [
+            torch.linspace(-20.0, 5.0, 25001, dtype=dtype),
+            torch.linspace(-1.001, -0.999, 201, dtype=dtype),
+            torch.linspace(-tail_bound * 1.001, -tail_bound * 0.999, 201, dtype=dtype),
+            torch.tensor([-1e8, 1e8, 1e20], dtype=dtype),
+        ]
+    ).unique(sorted=True)
+    actual = _deterministic_mace(normalized, torch.ones_like(normalized))
+
+    assert torch.isfinite(actual).all()
+    # Increasing z improves the mean at fixed variance, so neither objective may worsen.
+    assert bool((actual[1:, 1:] <= actual[:-1, 1:]).all())

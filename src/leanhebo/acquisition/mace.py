@@ -13,6 +13,32 @@ from leanhebo.acquisition.posterior import PosteriorEvaluator, PosteriorStats
 from leanhebo.errors import NumericalError
 
 
+def _log_expected_improvement(normalized: torch.Tensor, stddev: torch.Tensor) -> torch.Tensor:
+    """Evaluate log(sigma * (phi(z) + z * Phi(z))) without tail cancellation."""
+
+    upper = normalized.clamp_min(-1.0)
+    upper_density = torch.exp(-0.5 * upper.square()) / math.sqrt(2.0 * math.pi)
+    upper_log_ei = torch.log(upper_density + upper * torch.special.ndtr(upper))
+
+    # For z <= -1, factor out phi(z), then evaluate log(1 - |z| Phi(z) / phi(z)).
+    # erfcx removes the Gaussian exponential; expm1 retains the small difference.
+    # This is the stable LogEI identity also used by BoTorch's analytic LogEI.
+    magnitude = (-normalized).clamp_min(1.0)
+    tail_bound = 1e6 if normalized.dtype == torch.float64 else 1e3
+    bounded = magnitude.clamp_max(tail_bound)
+    log_ratio = torch.log(bounded * torch.special.erfcx(bounded / math.sqrt(2.0))) + 0.5 * math.log(
+        math.pi / 2.0
+    )
+    log_remainder = torch.where(
+        magnitude < tail_bound,
+        torch.log(-torch.expm1(log_ratio)),
+        # Beyond this bound, the next asymptotic term is below log-EI precision.
+        -2.0 * torch.log(magnitude),
+    )
+    lower_log_ei = -0.5 * magnitude.square() - 0.5 * math.log(2.0 * math.pi) + log_remainder
+    return torch.log(stddev) + torch.where(normalized > -1.0, upper_log_ei, lower_log_ei)
+
+
 class MACEEvaluator:
     """Compute stochastic LCB, negative log-EI, and negative log-PI."""
 
@@ -68,20 +94,8 @@ class MACEEvaluator:
         lcb = noisy_lcb_mean - self.kappa * stddev
         normalized = (tau - self.epsilon - improvement_mean) / stddev
 
-        log_phi = -0.5 * normalized.square() - 0.5 * math.log(2.0 * math.pi)
-        probability = torch.special.ndtr(normalized)
-        expected_improvement = stddev * (probability * normalized + torch.exp(log_phi))
-        log_ei = torch.log(expected_improvement)
-        log_pi = torch.log(probability)
-        log_ei_approx = (
-            torch.log(stddev) - 0.5 * normalized.square() - torch.log(normalized.square() - 1.0)
-        )
-        log_pi_approx = (
-            -0.5 * normalized.square() - torch.log(-normalized) - 0.5 * math.log(2.0 * math.pi)
-        )
-        direct = (normalized > -6.0) & torch.isfinite(log_ei) & torch.isfinite(log_pi)
-        negative_log_ei = -torch.where(direct, log_ei, log_ei_approx)
-        negative_log_pi = -torch.where(direct, log_pi, log_pi_approx)
+        negative_log_ei = -_log_expected_improvement(normalized, stddev)
+        negative_log_pi = -torch.special.log_ndtr(normalized)
         objectives = torch.stack((lcb, negative_log_ei, negative_log_pi), dim=-1)
         if self.validate and not torch.isfinite(objectives).all():
             bad = int((~torch.isfinite(objectives)).sum().item())
