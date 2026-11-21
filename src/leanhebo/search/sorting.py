@@ -89,80 +89,45 @@ def _non_dominated_sort_unchecked(
     return ranks, None
 
 
-def _front_crowding(objectives: Tensor) -> Tensor:
-    size, objective_count = objectives.shape
-    distance = torch.zeros(size, dtype=objectives.dtype, device=objectives.device)
-    if size == 0:
-        return distance
+def _crowding_unchecked(objectives: Tensor, ranks: Tensor | None = None) -> Tensor:
+    """Sum normalized neighbor gaps within each front, sorting all objectives together."""
+
+    size = objectives.shape[0]
     if size <= 2:
-        return torch.full_like(distance, torch.inf)
+        return objectives.new_full((size,), torch.inf)
 
-    for objective_index in range(objective_count):
-        values = objectives[:, objective_index]
-        order = torch.argsort(values, stable=True)
-        span = values[order[-1]] - values[order[0]]
-        if bool(span <= 0):
-            continue
-        distance[order[0]] = torch.inf
-        distance[order[-1]] = torch.inf
-        interior = (values[order[2:]] - values[order[:-2]]) / span
-        distance[order[1:-1]] += interior
-    return distance
+    order = torch.argsort(objectives, dim=0, stable=True)
+    first: int | Tensor = 0
+    last: int | Tensor = -1
+    if ranks is not None:
+        _, groups, counts = torch.unique(
+            ranks, sorted=True, return_inverse=True, return_counts=True
+        )
+        by_group = torch.argsort(groups[order], dim=0, stable=True)
+        order = order.gather(0, by_group)
+        last = counts.cumsum(0) - 1
+        first = last - counts + 1
 
-
-def _ranked_crowding(objectives: Tensor, ranks: Tensor) -> Tensor:
-    """Compute crowding for every front without a Python loop over fronts.
-
-    A stable value sort followed by a stable rank sort produces the same per-front ordering as
-    sorting each front independently.  Keeping fronts in one tensor avoids hundreds of tiny sort,
-    indexing, and allocation calls when an NSGA-II population contains many Pareto fronts.
-    """
-
-    population_size, objective_count = objectives.shape
-    distance = torch.zeros(
-        population_size,
-        dtype=objectives.dtype,
-        device=objectives.device,
-    )
-    if population_size == 0:
-        return distance
-
-    _, inverse, counts = torch.unique(
-        ranks,
-        sorted=True,
-        return_inverse=True,
-        return_counts=True,
-    )
-    distance[counts[inverse] <= 2] = torch.inf
-
-    for objective_index in range(objective_count):
-        values = objectives[:, objective_index]
-        by_value = torch.argsort(values, stable=True)
-        order = by_value[torch.argsort(ranks[by_value], stable=True)]
-        ordered_ranks = ranks[order]
-        ordered_values = values[order]
-
-        first = torch.ones(population_size, dtype=torch.bool, device=objectives.device)
-        first[1:] = ordered_ranks[1:] != ordered_ranks[:-1]
-        last = torch.ones_like(first)
-        last[:-1] = first[1:]
-        group = first.cumsum(dim=0) - 1
-
-        first_positions = torch.nonzero(first, as_tuple=False).flatten()
-        last_positions = torch.nonzero(last, as_tuple=False).flatten()
-        spans = ordered_values[last_positions] - ordered_values[first_positions]
-        contributes = (counts > 2) & (spans > 0)
-
-        boundary = (first | last) & contributes[group]
-        distance[order[boundary]] = torch.inf
-
-        interior = ~(first | last) & contributes[group]
-        positions = torch.nonzero(interior, as_tuple=False).flatten()
-        if positions.numel():
-            increments = (ordered_values[positions + 1] - ordered_values[positions - 1]) / spans[
-                group[positions]
-            ]
-            distance[order[positions]] += increments
+    values = objectives.gather(0, order)
+    spans = values[last] - values[first]
+    boundary = torch.zeros_like(spans).masked_fill_(spans > 0, torch.inf)
+    scales = torch.where(spans > 0, spans, 1.0)
+    if ranks is not None:
+        # Every sorted column has the same front boundaries.
+        scales = scales[groups[order[:, 0]]]
+    gaps = torch.zeros_like(values)
+    gaps[1:-1] = values[2:] - values[:-2]
+    gaps = gaps / scales
+    gaps[first] = boundary
+    gaps[last] = boundary
+    contributions = torch.empty_like(gaps).scatter_(0, order, gaps)
+    # Parallel reductions can round tied distances differently and change tournament winners.
+    first_column, *remaining_columns = contributions.unbind(dim=1)
+    distance = first_column.clone()
+    for column in remaining_columns:
+        distance.add_(column)
+    if ranks is not None:
+        distance.masked_fill_(counts[groups] <= 2, torch.inf)
     return distance
 
 
@@ -176,7 +141,7 @@ def crowding_distance(objectives: Tensor, ranks: Tensor | None = None) -> Tensor
     _validate_objectives(objectives)
     population_size = objectives.shape[0]
     if ranks is None:
-        return _front_crowding(objectives)
+        return _crowding_unchecked(objectives)
     if ranks.shape != (population_size,) or ranks.dtype not in (
         torch.int8,
         torch.int16,
@@ -190,4 +155,4 @@ def crowding_distance(objectives: Tensor, ranks: Tensor | None = None) -> Tensor
     if bool((ranks < 0).any()):
         raise ValueError("ranks must be non-negative")
 
-    return _ranked_crowding(objectives, ranks)
+    return _crowding_unchecked(objectives, ranks)

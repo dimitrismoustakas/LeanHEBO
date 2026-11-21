@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Portions derived from Huawei HEBO; see NOTICE.md.
 
+import pytest
 import torch
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 
@@ -71,6 +72,31 @@ def test_ranked_crowding_matches_independent_front_calculation() -> None:
 
     assert torch.equal(torch.isinf(actual), torch.isinf(expected))
     assert torch.allclose(actual[torch.isfinite(expected)], expected[torch.isfinite(expected)])
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=[
+                pytest.mark.gpu,
+                pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable"),
+            ],
+        ),
+    ],
+)
+def test_crowding_preserves_objective_accumulation_order(device: str) -> None:
+    generator = torch.Generator().manual_seed(7132)
+    for n_objectives in (3, 12):
+        values = torch.rand((113, n_objectives), generator=generator).to(device)
+        groups = torch.randint(0, 3, (len(values),), generator=generator).to(device)
+        for ranks in (None, groups):
+            expected = values.new_zeros(len(values))
+            for column in values.split(1, dim=1):
+                expected += crowding_distance(column, ranks)
+            assert torch.equal(crowding_distance(values, ranks), expected)
 
 
 def test_survival_takes_full_front_then_most_isolated_split_front() -> None:

@@ -25,9 +25,8 @@ from leanhebo.search.repair import (
     repair_population,
 )
 from leanhebo.search.sorting import (
-    _front_crowding,
+    _crowding_unchecked,
     _non_dominated_sort_unchecked,
-    _ranked_crowding,
 )
 from leanhebo.search.survival import _select_survivors_unchecked
 
@@ -438,7 +437,7 @@ class TorchNSGA2:
         )
         objectives = self._evaluate(objective, population)
         ranks, _ = _non_dominated_sort_unchecked(objectives)
-        crowding = _ranked_crowding(objectives, ranks)
+        crowding = _crowding_unchecked(objectives, ranks)
         completed_generations = 0
         objective_calls = 1
         candidate_evaluations = population.shape[0]
@@ -475,7 +474,7 @@ class TorchNSGA2:
             # Every front before the final retained front survives intact, so its crowding values
             # remain valid. Only the possibly truncated final front needs to be refreshed.
             final_front = ranks == ranks.max()
-            crowding[final_front] = _front_crowding(objectives[final_front])
+            crowding[final_front] = _crowding_unchecked(objectives[final_front])
             completed_generations += 1
 
         return NSGA2Result(

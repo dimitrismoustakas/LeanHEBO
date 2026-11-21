@@ -11,8 +11,8 @@ import torch
 from torch import Tensor
 
 from leanhebo.search.sorting import (
+    _crowding_unchecked,
     _non_dominated_sort_unchecked,
-    _ranked_crowding,
     _validate_objectives,
 )
 
@@ -55,7 +55,7 @@ def _select_survivors_unchecked(objectives: Tensor, n_survive: int) -> SurvivalS
     )
     covered = torch.ones_like(ranks, dtype=torch.bool) if tail_rank is None else ranks != tail_rank
     if n_survive:
-        crowding[covered] = _ranked_crowding(objectives[covered], ranks[covered])
+        crowding[covered] = _crowding_unchecked(objectives[covered], ranks[covered])
     selected: list[Tensor] = []
     selected_count = 0
     for rank in torch.unique(ranks, sorted=True):
