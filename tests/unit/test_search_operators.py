@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Portions derived from Huawei HEBO; see NOTICE.md.
 
+import pytest
 import torch
 
 from leanhebo.search.duplicates import _exact_duplicate_mask
@@ -161,7 +162,7 @@ def test_sbx_and_mixed_mutation_are_deterministic_and_respect_repair() -> None:
     assert torch.equal(result[:, 4], torch.ones(result.shape[0]))
 
 
-def test_sbx_leaves_unselected_dimensions_unchanged() -> None:
+def test_sbx_crosses_only_selected_numeric_dimensions() -> None:
     first = torch.tensor([[0.1, 0.2]])
     second = torch.tensor([[0.9, 0.8]])
     child_a, child_b = sbx_crossover(
@@ -175,26 +176,24 @@ def test_sbx_leaves_unselected_dimensions_unchanged() -> None:
         generator=torch.Generator().manual_seed(4),
     )
 
-    assert child_a[0, 1].item() == first[0, 1].item()
-    assert child_b[0, 1].item() == second[0, 1].item()
+    parent_values = (first[0, 0].item(), second[0, 0].item())
+    for child, parent in ((child_a, first), (child_b, second)):
+        value = child[0, 0].item()
+        assert 0.0 <= value <= 1.0
+        assert value not in parent_values
+        assert child[0, 1].item() == parent[0, 1].item()
 
 
-def test_binary_tournament_replays_exactly_from_generator_state() -> None:
-    ranks = torch.tensor([0, 1, 0, 2])
-    crowding = torch.tensor([0.0, 100.0, 1.0, 1000.0])
+def test_binary_tournament_prefers_lower_rank_then_higher_crowding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ranks = torch.tensor([0, 1, 0])
+    crowding = torch.tensor([1.0, 100.0, 3.0])
+    pairs = torch.tensor([[0, 1], [1, 0], [0, 2], [2, 0]])
+    monkeypatch.setattr(torch, "randint", lambda *args, **kwargs: pairs)
 
-    first = binary_tournament(
-        ranks,
-        crowding,
-        50,
-        generator=torch.Generator().manual_seed(42),
+    winners = binary_tournament(
+        ranks, crowding, len(pairs), generator=torch.Generator().manual_seed(42)
     )
-    second = binary_tournament(
-        ranks,
-        crowding,
-        50,
-        generator=torch.Generator().manual_seed(42),
-    )
 
-    assert torch.equal(first, second)
-    assert bool(((first >= 0) & (first < ranks.numel())).all())
+    assert winners.tolist() == [0, 0, 2, 2]
