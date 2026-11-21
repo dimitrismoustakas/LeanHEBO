@@ -149,40 +149,50 @@ def summarize(runs: list[Run], reference: str) -> tuple[pd.DataFrame, pd.DataFra
         costs = group.pivot(index="seed", columns="optimizer", values="cost")
         baseline = costs[reference].to_numpy()
         for optimizer in costs.columns:
-            own = costs[optimizer].to_numpy()[:, None]
-            probability = np.mean(own < baseline) + 0.5 * np.mean(own == baseline)
-            comparisons.append((task, fraction, optimizer, probability))
-    probabilities = pd.DataFrame(
-        comparisons, columns=["task", "fraction", "optimizer", "probability"]
-    ).pivot(index=["task", "fraction"], columns="optimizer", values="probability")
+            own = costs[optimizer].to_numpy()
+            probability = np.mean(own[:, None] < baseline) + 0.5 * np.mean(own[:, None] == baseline)
+            wins = np.count_nonzero(own < baseline)
+            ties = np.count_nonzero(own == baseline)
+            comparisons.append((task, fraction, optimizer, probability, wins, ties, len(own)))
+    scores = pd.DataFrame(
+        comparisons,
+        columns=["task", "fraction", "optimizer", "probability", "wins", "ties", "runs"],
+    )
+    probabilities = scores.pivot(
+        index=["task", "fraction"], columns="optimizer", values="probability"
+    )
     aggregate = probabilities.groupby("fraction").mean()
     final = curves[curves.fraction == 1.0]
     times = final.pivot(index=["task", "seed"], columns="optimizer", values="seconds")
     rows = [
         "# Optimizer comparison",
         "",
-        f"Win probability compares every optimizer run with every {reference} run on the same "
-        "task, counts ties as half, then averages tasks equally. 50% is neutral. "
-        "Anytime probability averages 20 budget fractions from 5% to 100%. "
-        "This measures how often an optimizer wins; task costs show the size of the differences.",
+        f"The first two win probabilities compare every optimizer run with every {reference} run "
+        "on the same task. Paired scores compare the same task and seed. W/T/L counts final wins, "
+        "ties, and losses. Win probabilities count ties as half and weight tasks equally. "
+        "Anytime scores average 20 budget fractions from 5% to 100%.",
         "",
         "Failed runs retain their best evaluated cost for the remaining budget. "
         "Timing uses only task/seed pairs completed by every compared optimizer. "
         "Intervals in task plots are interquartile ranges, not confidence intervals.",
         "",
         f"| Optimizer | Final win vs {reference} | Anytime win vs {reference} | "
-        "Median ask + tell (s) | "
+        "Paired final W/T/L | Paired anytime win | Median ask + tell (s) | "
         f"{reference}/optimizer | Failed runs |",
-        "|---|---:|---:|---:|---:|---:|",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for optimizer in probabilities.columns:
         own = [r for r in runs if r.optimizer == optimizer]
         seconds = times[optimizer].median()
         ratios = times[reference] / times[optimizer]
         speed = ratios.median()
+        paired = scores[scores.optimizer == optimizer]
+        wins, ties, count = paired.loc[paired.fraction == 1, ["wins", "ties", "runs"]].sum()
+        paired_anytime = ((paired.wins + 0.5 * paired.ties) / paired.runs).mean()
         rows.append(
             f"| {optimizer} | {aggregate[optimizer].iloc[-1]:.1%} | "
-            f"{aggregate[optimizer].mean():.1%} | "
+            f"{aggregate[optimizer].mean():.1%} | {wins}/{ties}/{count - wins - ties} | "
+            f"{paired_anytime:.1%} | "
             f"{seconds:.2f} | {speed:.2f}x | {sum(r.failed for r in own)}/{len(own)} |"
         )
     rows.extend(

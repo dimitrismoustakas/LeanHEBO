@@ -49,7 +49,7 @@ def test_win_probabilities_native_costs_and_paired_timing():
     assert final_probabilities.to_dict() == {"HEBO": 0.5, "LeanHEBO": 1.0}
     final = curves[(curves.fraction == 1) & (curves.optimizer == "LeanHEBO")]
     assert final.cost.tolist() == [6.0] * 4
-    assert "| LeanHEBO | 100.0% |" in report
+    assert "| LeanHEBO | 100.0% | 68.8% | 4/0/0 | 68.8% |" in report
     assert "| 0.75 | 4.00x | 0/4 |" in report
     assert "| task-a | LeanHEBO | 6 | -2 |" in report
 
@@ -104,10 +104,12 @@ def test_probability_uses_all_seed_pairs_half_ties_and_equal_task_weights():
         for optimizer, costs in optimizers.items()
         for seed, cost in enumerate(costs)
     ]
-    _, probabilities, _ = summarize(runs, "HEBO")
+    _, probabilities, report = summarize(runs, "HEBO")
     assert probabilities.loc[("task-a", 1.0), "LeanHEBO"] == 0.875
     assert probabilities.loc[("task-b", 1.0), "LeanHEBO"] == 0.0
     assert probabilities.groupby("fraction").mean().iloc[-1]["LeanHEBO"] == 0.4375
+    assert "| LeanHEBO | 43.8% | 43.8% | 2/0/3 | 50.0% |" in report
+    assert "| HEBO | 50.0% | 50.0% | 0/5/0 | 50.0% |" in report
 
 
 def test_rejects_missing_or_duplicate_runs(tmp_path):
