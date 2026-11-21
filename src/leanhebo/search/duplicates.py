@@ -8,27 +8,15 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from leanhebo.search.repair import MixedVariableSpec, repair_population
-
-
-def _validate_population(population: Tensor, *, name: str) -> None:
-    if population.ndim != 2:
-        raise ValueError(f"{name} must have shape [population, dimensions]")
-    if not population.is_floating_point():
-        raise TypeError(f"{name} must use a floating-point dtype")
-    if not bool(torch.isfinite(population).all()):
-        raise ValueError(f"{name} contains non-finite values")
-
 
 def _exact_duplicate_mask(population: Tensor, existing: Tensor | None = None) -> Tensor:
-    """Mark exact row duplicates without materializing a quadratic comparison tensor."""
+    """Mark exact row duplicates, giving priority to existing rows and first occurrences."""
 
     count, dimension = population.shape
     if count == 0:
         return torch.zeros(0, dtype=torch.bool, device=population.device)
     if dimension == 0:
-        # ``torch.unique(..., dim=0)`` rejects zero-column tensors. Exact row comparison treats
-        # every such row as equal, so preserve the established public behavior explicitly.
+        # All zero-column rows are equal, and torch.unique cannot compare them along dim 0.
         mask = torch.arange(count, device=population.device) > 0
         if existing is not None and existing.shape[0] > 0:
             mask.fill_(True)
@@ -69,37 +57,3 @@ def _exact_duplicate_mask(population: Tensor, existing: Tensor | None = None) ->
     )
     population_indices = indices[offset:]
     return first_indices[inverse[offset:]] != population_indices
-
-
-def duplicate_mask(
-    population: Tensor,
-    *,
-    existing: Tensor | None = None,
-    spec: MixedVariableSpec | None = None,
-) -> Tensor:
-    """Mark exactly repeated rows, preserving the first occurrence in ``population``.
-
-    Rows matching ``existing`` are always marked. When a specification is provided, both sets are
-    repaired before comparison, so values such as ``1.1`` and ``0.9`` are the same canonical integer
-    point.
-    """
-
-    _validate_population(population, name="population")
-    if spec is not None:
-        if population.shape[1] != spec.dimension:
-            raise ValueError("population dimensionality does not match the search specification")
-        if population.device != spec.lower.device or population.dtype != spec.lower.dtype:
-            raise ValueError("population and search specification must share device and dtype")
-        canonical = repair_population(population, spec)
-    else:
-        canonical = population
-
-    canonical_existing: Tensor | None = None
-    if existing is not None:
-        _validate_population(existing, name="existing")
-        if existing.shape[1:] != population.shape[1:]:
-            raise ValueError("existing and population must have the same dimensionality")
-        if existing.device != population.device or existing.dtype != population.dtype:
-            raise ValueError("existing and population must share device and dtype")
-        canonical_existing = repair_population(existing, spec) if spec is not None else existing
-    return _exact_duplicate_mask(canonical, canonical_existing)

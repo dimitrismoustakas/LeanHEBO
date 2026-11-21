@@ -5,10 +5,9 @@ import pytest
 import torch
 
 import leanhebo.search.nsga2 as nsga2_module
-from leanhebo.search.duplicates import duplicate_mask
 from leanhebo.search.nsga2 import TorchNSGA2
 from leanhebo.search.repair import MixedVariableSpec, repair_population
-from leanhebo.search.sorting import crowding_distance
+from leanhebo.search.sorting import _crowding_unchecked
 
 
 def _biobjective(values: torch.Tensor) -> torch.Tensor:
@@ -44,7 +43,7 @@ def test_minimize_is_reproducible_from_a_torch_generator() -> None:
     assert first.objectives.shape == (24, 2)
     torch.testing.assert_close(
         first.crowding,
-        crowding_distance(first.objectives, first.ranks),
+        _crowding_unchecked(first.objectives, first.ranks),
     )
     assert first.generations == 8
     assert first.objective_calls == 9
@@ -124,7 +123,8 @@ def test_combined_parent_offspring_pool_is_unique_every_generation() -> None:
             offspring = super()._make_offspring(
                 population, ranks, crowding, spec, sampler, generator
             )
-            assert not bool(duplicate_mask(torch.cat((population, offspring))).any())
+            pool = torch.cat((population, offspring))
+            assert len(torch.unique(pool, dim=0)) == len(pool)
             checked_generations += 1
             return offspring
 
@@ -184,7 +184,7 @@ def test_discrete_initialization_completes_after_repeated_sobol_duplicates(
     ).minimize(lambda population: population.sum(dim=1))
 
     assert result.population.shape == (10, 2)
-    assert not bool(duplicate_mask(result.population).any())
+    assert len(torch.unique(result.population, dim=0)) == 10
 
 
 def test_discrete_offspring_completion_uses_unseen_lattice_points(
@@ -227,7 +227,8 @@ def test_discrete_offspring_completion_uses_unseen_lattice_points(
     )
 
     assert offspring.shape == population.shape
-    assert not bool(duplicate_mask(torch.cat((population, offspring))).any())
+    pool = torch.cat((population, offspring))
+    assert len(torch.unique(pool, dim=0)) == len(pool)
 
 
 def test_objective_shape_and_finite_values_are_checked() -> None:

@@ -3,7 +3,7 @@
 
 import torch
 
-from leanhebo.search.duplicates import duplicate_mask
+from leanhebo.search.duplicates import _exact_duplicate_mask
 from leanhebo.search.operators import (
     binary_tournament,
     categorical_mutation,
@@ -67,7 +67,7 @@ def test_duplicate_detection_uses_repaired_integer_codes_and_stable_order() -> N
         ]
     )
 
-    mask = duplicate_mask(population, spec=spec)
+    mask = _exact_duplicate_mask(repair_population(population, spec))
 
     assert mask.tolist() == [False, True, False]
 
@@ -85,7 +85,7 @@ def test_exact_duplicate_detection_preserves_existing_priority_and_signed_zero()
     )
     existing = torch.tensor([[2.0, 3.0], [9.0, 9.0]], dtype=torch.float64)
 
-    mask = duplicate_mask(population, existing=existing)
+    mask = _exact_duplicate_mask(population, existing=existing)
 
     assert mask.tolist() == [False, True, True, True, False]
 
@@ -93,8 +93,8 @@ def test_exact_duplicate_detection_preserves_existing_priority_and_signed_zero()
 def test_exact_duplicate_detection_supports_empty_dimensions() -> None:
     population = torch.empty((3, 0))
 
-    assert duplicate_mask(population).tolist() == [False, True, True]
-    assert duplicate_mask(population, existing=torch.empty((1, 0))).tolist() == [True] * 3
+    assert _exact_duplicate_mask(population).tolist() == [False, True, True]
+    assert _exact_duplicate_mask(population, existing=torch.empty((1, 0))).tolist() == [True] * 3
 
 
 def test_exact_duplicate_detection_matches_pairwise_reference() -> None:
@@ -107,7 +107,7 @@ def test_exact_duplicate_detection_matches_pairwise_reference() -> None:
     population_indices = combined_indices[existing.shape[0] :]
     expected = (equal & (combined_indices[None, :] < population_indices[:, None])).any(dim=1)
 
-    assert torch.equal(duplicate_mask(population, existing=existing), expected)
+    assert torch.equal(_exact_duplicate_mask(population, existing=existing), expected)
 
 
 def test_categorical_mutation_always_chooses_an_alternative_at_probability_one() -> None:

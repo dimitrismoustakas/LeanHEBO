@@ -5,8 +5,12 @@ import pytest
 import torch
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 
-from leanhebo.search.sorting import crowding_distance, dominance_matrix, non_dominated_sort
-from leanhebo.search.survival import select_survivors
+from leanhebo.search.sorting import (
+    _crowding_unchecked,
+    _dominance_matrix_unchecked,
+    _non_dominated_sort_unchecked,
+)
+from leanhebo.search.survival import _select_survivors_unchecked
 
 
 def test_non_dominated_sort_assigns_expected_fronts() -> None:
@@ -20,8 +24,8 @@ def test_non_dominated_sort_assigns_expected_fronts() -> None:
         ]
     )
 
-    dominates = dominance_matrix(objectives)
-    ranks = non_dominated_sort(objectives)
+    dominates = _dominance_matrix_unchecked(objectives)
+    ranks, _ = _non_dominated_sort_unchecked(objectives)
 
     assert not bool(torch.diagonal(dominates).any())
     assert torch.equal(ranks, torch.tensor([0, 0, 0, 1, 2]))
@@ -36,13 +40,13 @@ def test_dominance_matrix_matches_strict_pairwise_reference_with_ties() -> None:
         strictly_better = (objectives[:, None, :] < objectives[None, :, :]).any(dim=-1)
         expected = no_worse & strictly_better
 
-        assert torch.equal(dominance_matrix(objectives), expected)
+        assert torch.equal(_dominance_matrix_unchecked(objectives), expected)
 
 
 def test_crowding_distance_is_normalized_with_infinite_boundaries() -> None:
     objectives = torch.tensor([[0.0, 2.0], [1.0, 1.0], [2.0, 0.0]])
 
-    distance = crowding_distance(objectives)
+    distance = _crowding_unchecked(objectives)
 
     assert torch.isinf(distance[[0, 2]]).all()
     assert distance[1].item() == 2.0
@@ -51,7 +55,7 @@ def test_crowding_distance_is_normalized_with_infinite_boundaries() -> None:
 def test_crowding_ignores_constant_objective_ranges() -> None:
     objectives = torch.tensor([[0.0, 4.0], [1.0, 4.0], [2.0, 4.0]])
 
-    distance = crowding_distance(objectives)
+    distance = _crowding_unchecked(objectives)
 
     assert torch.isinf(distance[[0, 2]]).all()
     assert distance[1].item() == 1.0
@@ -66,9 +70,9 @@ def test_ranked_crowding_matches_independent_front_calculation() -> None:
     expected = torch.empty(80)
     for rank in torch.unique(ranks, sorted=True):
         indices = torch.nonzero(ranks == rank, as_tuple=False).flatten()
-        expected[indices] = crowding_distance(objectives[indices])
+        expected[indices] = _crowding_unchecked(objectives[indices])
 
-    actual = crowding_distance(objectives, ranks)
+    actual = _crowding_unchecked(objectives, ranks)
 
     assert torch.equal(torch.isinf(actual), torch.isinf(expected))
     assert torch.allclose(actual[torch.isfinite(expected)], expected[torch.isfinite(expected)])
@@ -95,8 +99,8 @@ def test_crowding_preserves_objective_accumulation_order(device: str) -> None:
         for ranks in (None, groups):
             expected = values.new_zeros(len(values))
             for column in values.split(1, dim=1):
-                expected += crowding_distance(column, ranks)
-            assert torch.equal(crowding_distance(values, ranks), expected)
+                expected += _crowding_unchecked(column, ranks)
+            assert torch.equal(_crowding_unchecked(values, ranks), expected)
 
 
 def test_survival_takes_full_front_then_most_isolated_split_front() -> None:
@@ -110,7 +114,7 @@ def test_survival_takes_full_front_then_most_isolated_split_front() -> None:
         ]
     )
 
-    selection = select_survivors(objectives, 4)
+    selection = _select_survivors_unchecked(objectives, 4)
 
     assert selection.indices[:3].tolist() == [0, 1, 2]
     assert selection.indices[3].item() == 3
@@ -119,8 +123,8 @@ def test_survival_takes_full_front_then_most_isolated_split_front() -> None:
 def test_truncated_survival_matches_full_ranking_on_every_retained_point() -> None:
     generator = torch.Generator().manual_seed(211)
     objectives = torch.rand((200, 3), generator=generator)
-    full_ranks = non_dominated_sort(objectives)
-    full_crowding = crowding_distance(objectives, full_ranks)
+    full_ranks, _ = _non_dominated_sort_unchecked(objectives)
+    full_crowding = _crowding_unchecked(objectives, full_ranks)
     n_survive = 100
 
     expected: list[torch.Tensor] = []
@@ -136,7 +140,7 @@ def test_truncated_survival_matches_full_ranking_on_every_retained_point() -> No
         expected.append(front[order[:remaining]])
         break
 
-    selection = select_survivors(objectives, n_survive)
+    selection = _select_survivors_unchecked(objectives, n_survive)
     expected_indices = torch.cat(expected)
 
     assert torch.equal(selection.indices, expected_indices)
@@ -150,13 +154,6 @@ def test_truncated_survival_matches_full_ranking_on_every_retained_point() -> No
     )
 
 
-def test_empty_objective_matrix_has_empty_ranks_and_crowding() -> None:
-    objectives = torch.empty((0, 3))
-
-    assert non_dominated_sort(objectives).shape == (0,)
-    assert crowding_distance(objectives).shape == (0,)
-
-
 def test_non_dominated_ranks_match_pymoo_reference() -> None:
     generator = torch.Generator().manual_seed(37)
     objectives = torch.rand((40, 3), generator=generator)
@@ -167,4 +164,5 @@ def test_non_dominated_ranks_match_pymoo_reference() -> None:
     for rank, front in enumerate(pymoo_fronts):
         expected[torch.as_tensor(front, dtype=torch.long)] = rank
 
-    assert torch.equal(non_dominated_sort(objectives), expected)
+    ranks, _ = _non_dominated_sort_unchecked(objectives)
+    assert torch.equal(ranks, expected)

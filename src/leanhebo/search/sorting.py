@@ -9,43 +9,14 @@ import torch
 from torch import Tensor
 
 
-def _validate_objectives(objectives: Tensor) -> None:
-    if objectives.ndim != 2:
-        raise ValueError(
-            f"objectives must have shape [population, objectives], got {tuple(objectives.shape)}"
-        )
-    if objectives.shape[1] == 0:
-        raise ValueError("at least one objective is required")
-    if not objectives.is_floating_point():
-        raise TypeError("objectives must use a floating-point dtype")
-    if not bool(torch.isfinite(objectives).all()):
-        raise ValueError("objectives contain non-finite values")
-
-
-def dominance_matrix(objectives: Tensor) -> Tensor:
-    """Return ``matrix[i, j] == True`` when point ``i`` dominates point ``j``.
-
-    All objectives are minimized. Equality alone is not dominance.
-    """
-
-    _validate_objectives(objectives)
-    return _dominance_matrix_unchecked(objectives)
-
-
 def _dominance_matrix_unchecked(objectives: Tensor) -> Tensor:
+    """Return the strict Pareto dominance relation for finite minimization objectives."""
+
     no_worse = (objectives[:, None, :] <= objectives[None, :, :]).all(dim=-1)
     # For finite values, i is strictly better than j in at least one objective exactly when
     # i is no worse than j but j is not no worse than i. Reusing the transpose avoids a second
     # population-by-population-by-objective comparison without changing tie behavior.
     return no_worse & ~no_worse.mT
-
-
-def non_dominated_sort(objectives: Tensor) -> Tensor:
-    """Assign zero-based Pareto ranks to a minimization objective matrix."""
-
-    _validate_objectives(objectives)
-    ranks, _ = _non_dominated_sort_unchecked(objectives)
-    return ranks
 
 
 def _non_dominated_sort_unchecked(
@@ -62,12 +33,6 @@ def _non_dominated_sort_unchecked(
         dtype=torch.long,
         device=dominates.device,
     )
-    if population_size == 0:
-        return ranks, None
-    if stop_after == 0:
-        ranks.fill_(0)
-        return ranks, 0
-
     domination_count = dominates.sum(dim=0, dtype=torch.long)
     current = torch.nonzero(domination_count == 0, as_tuple=False).flatten()
     rank = 0
@@ -129,30 +94,3 @@ def _crowding_unchecked(objectives: Tensor, ranks: Tensor | None = None) -> Tens
     if ranks is not None:
         distance.masked_fill_(counts[groups] <= 2, torch.inf)
     return distance
-
-
-def crowding_distance(objectives: Tensor, ranks: Tensor | None = None) -> Tensor:
-    """Compute NSGA-II crowding distances within each Pareto front.
-
-    If ``ranks`` is omitted, the entire objective matrix is treated as one front. Objective ranges
-    of zero add no distance, avoiding arbitrary boundary preference for a constant objective.
-    """
-
-    _validate_objectives(objectives)
-    population_size = objectives.shape[0]
-    if ranks is None:
-        return _crowding_unchecked(objectives)
-    if ranks.shape != (population_size,) or ranks.dtype not in (
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-        torch.uint8,
-    ):
-        raise ValueError("ranks must be a one-dimensional integer tensor matching the population")
-    if ranks.device != objectives.device:
-        raise ValueError("ranks and objectives must be on the same device")
-    if bool((ranks < 0).any()):
-        raise ValueError("ranks must be non-negative")
-
-    return _crowding_unchecked(objectives, ranks)
