@@ -227,14 +227,19 @@ def test_mace_improvement_objectives_are_monotone_across_tail_transitions(
     dtype: torch.dtype,
 ) -> None:
     tail_bound = 1e6 if dtype == torch.float64 else 1e3
+    # Build the overlapping grids in units of 1e-5. Independent floating-point
+    # linspaces can place the same intended z on two adjacent floats.
+    coarse_ticks = torch.arange(-2_000_000, 500_001, 100)
+    transition_ticks = torch.arange(-100_100, -99_899)
+    central = torch.cat((coarse_ticks, transition_ticks)).unique(sorted=True).to(dtype) / 100_000
     normalized = torch.cat(
         [
-            torch.linspace(-20.0, 5.0, 25001, dtype=dtype),
-            torch.linspace(-1.001, -0.999, 201, dtype=dtype),
+            torch.tensor([-1e8], dtype=dtype),
             torch.linspace(-tail_bound * 1.001, -tail_bound * 0.999, 201, dtype=dtype),
-            torch.tensor([-1e8, 1e8, 1e20], dtype=dtype),
+            central,
+            torch.tensor([1e8, 1e20], dtype=dtype),
         ]
-    ).unique(sorted=True)
+    )
     actual = _deterministic_mace(normalized, torch.ones_like(normalized))
 
     assert torch.isfinite(actual).all()
