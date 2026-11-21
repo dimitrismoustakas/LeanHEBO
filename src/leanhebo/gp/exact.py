@@ -193,7 +193,18 @@ class ExactGPSurrogate:
             raise ValueError("at least two observations are required to fit an exact GP")
 
         first_fit = self.model is None
-        full_refit = first_fit or force_full_refit or self._full_refit_due(targets.numel())
+        # A fit to identical targets starts the signal variance at machine epsilon.
+        # Warm-starting there attributes the first observed contrast almost entirely to noise.
+        first_contrast = (
+            self.config.reuse_parameters
+            and self.train_targets is not None
+            and torch.equal(self.train_targets[1:], self.train_targets[:-1])
+            and not torch.equal(targets[1:], targets[:-1])
+        )
+        reuse_parameters = self.config.reuse_parameters and not first_contrast
+        full_refit = (
+            first_fit or first_contrast or force_full_refit or self._full_refit_due(targets.numel())
+        )
         kind = "initial" if first_fit else ("full_refit" if full_refit else "update")
         steps = self.config.initial_steps if full_refit else self.config.update_steps
         if self.transform_version != transform_version and self.diagnostics is not None:
@@ -202,10 +213,10 @@ class ExactGPSurrogate:
         self._store_training_data(continuous, categorical, targets)
         self.transform_version = transform_version
 
-        if full_refit or not self.config.use_set_train_data or not self.config.reuse_parameters:
+        if full_refit or not self.config.use_set_train_data or not reuse_parameters:
             retain_model_state: Mapping[str, Any] | None = None
             retain_likelihood_state: Mapping[str, Any] | None = None
-            if self.config.reuse_parameters and self.model is not None:
+            if reuse_parameters and self.model is not None:
                 retain_model_state = self.model.state_dict()
                 assert self.likelihood is not None
                 retain_likelihood_state = self.likelihood.state_dict()
@@ -220,7 +231,7 @@ class ExactGPSurrogate:
                     and self.optimizer is not None
                     else None
                 ),
-                initialize_kernel=first_fit or not self.config.reuse_parameters,
+                initialize_kernel=first_fit or not reuse_parameters,
             )
         else:
             assert self.model is not None

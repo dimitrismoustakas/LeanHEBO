@@ -258,6 +258,28 @@ def test_input_scaler_fits_the_observed_range_instead_of_design_bounds() -> None
     torch.testing.assert_close(gp.input_scaler.data_max_, torch.tensor([60.0]))  # type: ignore[union-attr]
 
 
+def test_first_target_contrast_recovers_the_cold_fit_after_a_flat_start() -> None:
+    gp = _surrogate()
+    inputs = torch.tensor([[0.0], [0.2], [0.4], [0.8]])
+    categories = torch.empty((4, 0), dtype=torch.long)
+    targets = torch.tensor([0.0, 0.0, 0.0, -1.0])
+    gp.fit(inputs[:2], categories[:2], targets[:2], transform_version=1)
+    flat_update = gp.fit(inputs[:3], categories[:3], targets[:3], transform_version=2)
+    assert flat_update.kind == "update"
+
+    restored = _surrogate()
+    restored.load_state_dict(gp.state_dict())
+    cold = _surrogate()
+    cold.fit(inputs, categories, targets, transform_version=3)
+    query = torch.tensor([[0.1], [0.5], [0.8]])
+    expected = cold.predict(query, categories[:3])
+    for warm in (gp, restored):
+        report = warm.fit(inputs, categories, targets, transform_version=3)
+        assert report.kind == "full_refit"
+        for actual, reference in zip(warm.predict(query, categories[:3]), expected, strict=True):
+            torch.testing.assert_close(actual, reference)
+
+
 def test_observed_range_scaler_and_predictions_survive_state_round_trip() -> None:
     gp = _surrogate()
     continuous = torch.tensor([[40.0], [50.0], [60.0], [65.0]])
