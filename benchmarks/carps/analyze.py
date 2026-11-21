@@ -23,14 +23,9 @@ class Run:
     metric: str = "cost"
 
 
-def read_jsonl(path: Path) -> list[dict]:
-    return [
-        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
-    ]
-
-
 def read_run(path: Path) -> Run:
-    header, *rows = read_jsonl(path)
+    with path.open(encoding="utf-8") as stream:
+        header, *rows = (json.loads(line) for line in stream if line.strip())
     trials = [row for row in rows if "trial" in row]
     if [row["trial"] for row in trials] != list(range(1, len(trials) + 1)):
         raise ValueError(f"Nonconsecutive trials: {path}")
@@ -49,55 +44,8 @@ def read_run(path: Path) -> Run:
     )
 
 
-def read_carps_run(config_path: Path) -> Run:
-    """Read the retained CARP-S comparisons without rewriting their raw results."""
-    from omegaconf import OmegaConf
-
-    config = OmegaConf.load(config_path)
-    task = OmegaConf.to_container(config.task, resolve=True)
-    directory = config_path.parent.parent
-    trial_path = directory / "trial_logs.jsonl"
-    rows = read_jsonl(trial_path) if trial_path.exists() else []
-    timing_path = directory / "optimizer_timing.jsonl"
-    timing = read_jsonl(timing_path) if timing_path.exists() else []
-    expected = list(range(1, len(rows) + 1))
-    if [row["n_trials"] for row in rows] != expected or [
-        row["trial"] for row in timing
-    ] != expected:
-        raise ValueError(f"Trial/timing mismatch: {directory}")
-    values = np.asarray(
-        [
-            [row["trial_value"]["cost"], clock["ask_seconds"], clock["tell_seconds"]]
-            for row, clock in zip(rows, timing, strict=True)
-        ],
-        dtype=float,
-    ).reshape(-1, 3)
-    succeeded = np.asarray([row["trial_value"]["status"] == 1 for row in rows])
-    if len(values):
-        values[~succeeded, 0] = np.inf
-    optimum = None
-    if task["name"].startswith("bbob/"):
-        import ioh
-
-        _, dimension, fid, instance = task["name"].split("/")
-        optimum = float(ioh.get_problem(int(fid), int(instance), int(dimension)).optimum.y)
-    return Run(
-        config["optimizer_id"],
-        task["name"],
-        config["seed"],
-        task["optimization_resources"]["n_trials"],
-        values,
-        not succeeded.all() or len(rows) < task["optimization_resources"]["n_trials"],
-        optimum,
-        task["output_space"]["objectives"][0],
-    )
-
-
 def load_runs(paths: list[Path]) -> list[Run]:
-    runs = []
-    for path in paths:
-        runs.extend(read_run(p) for p in sorted(path.rglob("run.jsonl")))
-        runs.extend(read_carps_run(p) for p in sorted(path.rglob(".hydra/config.yaml")))
+    runs = [read_run(path) for root in paths for path in sorted(root.rglob("run.jsonl"))]
     if not runs:
         raise ValueError("No runs found")
     keys = [(run.optimizer, run.task, run.seed) for run in runs]
