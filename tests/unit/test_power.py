@@ -87,16 +87,18 @@ def test_output_transform_state_restores_fitted_transform() -> None:
     torch.testing.assert_close(restored.transform(x), transform.transform(x))
 
 
-def test_output_transform_refit_schedule_and_force() -> None:
+@pytest.mark.parametrize(
+    ("force", "skipped_fits"), [(False, 2), (True, 0)], ids=["scheduled", "forced_early"]
+)
+def test_output_transform_refit_schedule_and_force(force: bool, skipped_fits: int) -> None:
     first = torch.tensor([1.0, 2.0, 4.0], dtype=torch.float64)
     second = torch.tensor([1.0, 3.0, 9.0, 27.0], dtype=torch.float64)
     transform = OutputTransform(WarpConfig(refit_interval=3)).fit(first)
     original = transform.transform(second)
-    transform.fit(second)
-    assert transform.version == 1
-    transform.fit(second)
-    assert transform.version == 1
-    transform.fit(second, force=True)
+    for _ in range(skipped_fits):
+        transform.fit(second)
+        assert transform.version == 1
+    transform.fit(second, force=force)
     assert transform.version == 2
     assert not torch.equal(transform.transform(second), original)
 
