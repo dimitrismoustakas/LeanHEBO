@@ -408,6 +408,40 @@ def _matern_reference(
     return (1 + radius) * torch.exp(-radius)
 
 
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=[
+                pytest.mark.gpu,
+                pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable"),
+            ],
+        ),
+    ],
+)
+def test_numeric_trend_matches_bounded_feature_covariance(device: str) -> None:
+    extractor = MixedFeatureExtractor(2, ())
+    kernel = build_kernel(num_continuous=2, feature_extractor=extractor, ard=True).base_kernel
+    kernel = kernel.to(device)
+    local = build_base_kernel(num_continuous=2, feature_extractor=extractor, ard=True).to(device)
+    # A narrow warm start can place a legal query far outside the fitted input range.
+    left = torch.tensor([[-1.0, 0.2], [0.5, 0.8], [1e12, 0.4]], device=device)
+    right = torch.tensor([[0.3, -0.7], [0.8, 0.2], [-9.0, 0.9]], device=device)
+
+    def basis(x: torch.Tensor) -> torch.Tensor:
+        x = x.clamp(-3, 3)
+        radius = (x.square() - 1 / 3).sum(dim=-1, keepdim=True)
+        return torch.cat((x, radius), dim=-1)
+
+    expected = local(left, right).to_dense() + basis(left) @ basis(right).T / 2
+    assert not kernel.is_stationary
+    torch.testing.assert_close(kernel(left, right).to_dense(), expected)
+    torch.testing.assert_close(kernel(left, right, diag=True), expected.diag())
+    assert torch.isfinite(kernel(left, diag=True)).all()
+
+
 @pytest.mark.parametrize("categorical", [False, True], ids=["numeric-ard", "learned-embedding"])
 @pytest.mark.parametrize(
     "device",

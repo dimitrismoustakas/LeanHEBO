@@ -61,6 +61,40 @@ class _MaternKernel(gpytorch.kernels.MaternKernel):  # type: ignore[misc]
         return ((1 + scaled) * torch.exp(-scaled)).to(dtype=x1.dtype)
 
 
+class _TrendMaternKernel(_MaternKernel):
+    """Add independent linear coefficients and one shared quadratic coefficient."""
+
+    @property
+    def is_stationary(self) -> bool:
+        return False
+
+    def forward(
+        self,
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        diag: bool = False,
+        last_dim_is_batch: bool = False,
+        **params: object,
+    ) -> torch.Tensor:
+        spatial = super().forward(x1, x2, diag=diag, last_dim_is_batch=last_dim_is_batch, **params)
+        # Allow one observed range of extrapolation beyond each edge of [-1, 1].
+        # A narrow warm start gives little information about distant curvature.
+        x1 = x1.clamp(-3, 3)
+        x2 = x2.clamp(-3, 3)
+        if last_dim_is_batch:
+            x1 = x1.transpose(-1, -2).unsqueeze(-1)
+            x2 = x2.transpose(-1, -2).unsqueeze(-1)
+        dim = x1.size(-1)
+        # Center the squared coordinates at E[x²] for a uniform [-1, 1] input.
+        left = (x1.square() - 1 / 3).sum(-1)
+        right = (x2.square() - 1 / 3).sum(-1)
+        if diag:
+            trend = (x1 * x2).sum(-1) + left * right
+        else:
+            trend = x1 @ x2.transpose(-1, -2) + left.unsqueeze(-1) * right.unsqueeze(-2)
+        return spatial + trend / dim
+
+
 class MixedFeatureExtractor(nn.Module):
     """Concatenate numeric inputs and compact learned categorical embeddings."""
 
@@ -94,13 +128,14 @@ def build_kernel(
     feature_extractor: MixedFeatureExtractor,
     ard: bool,
 ) -> gpytorch.kernels.ScaleKernel:
-    """Construct the product Matérn-3/2 covariance used by the main HEBO GP path."""
+    """Build the unconditional GP covariance with a global numeric trend."""
 
     return gpytorch.kernels.ScaleKernel(
         build_base_kernel(
             num_continuous=num_continuous,
             feature_extractor=feature_extractor,
             ard=ard,
+            global_trend=True,
         ),
         outputscale_prior=gpytorch.priors.GammaPrior(0.5, 0.5),
     )
@@ -111,13 +146,15 @@ def build_base_kernel(
     num_continuous: int,
     feature_extractor: MixedFeatureExtractor,
     ard: bool,
+    global_trend: bool = False,
 ) -> gpytorch.kernels.Kernel:
-    """Construct the unit-diagonal mixed Matérn base without an output scale."""
+    """Build the mixed covariance, retaining unit diagonal for conditional blocks."""
 
     components: list[gpytorch.kernels.Kernel] = []
     if num_continuous:
+        numeric_kernel = _TrendMaternKernel if global_trend else _MaternKernel
         components.append(
-            _MaternKernel(
+            numeric_kernel(
                 ard_num_dims=num_continuous if ard else None,
                 active_dims=torch.arange(num_continuous),
             )
