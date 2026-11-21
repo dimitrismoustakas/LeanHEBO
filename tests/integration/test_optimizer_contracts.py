@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from leanhebo import LeanHEBO
-from leanhebo.acquisition import PosteriorEvaluator, PosteriorStats
+from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator, PosteriorStats
 from leanhebo.config import (
     AcquisitionConfig,
     GPConfig,
@@ -276,6 +276,65 @@ def test_integrated_mace_evaluates_each_candidate_chunk_once(
     for candidate_count, posterior_calls in events:
         assert posterior_calls == math.ceil(candidate_count / 3)
     assert optimizer.diagnostics.counters["posterior.calls"] == sum(calls for _, calls in events)
+
+
+def test_batch_uses_pareto_fronts_of_the_unseen_population(monkeypatch: pytest.MonkeyPatch) -> None:
+    optimizer = LeanHEBO(
+        Space(Integer("x", 0, 6)),
+        config=LeanHEBOConfig(
+            random_samples=2,
+            runtime=RuntimeConfig(seed=7),
+            gp=GPConfig(initial_steps=0),
+            search=SearchConfig(population_size=7, generations=1),
+        ),
+    )
+    optimizer.observe([{"x": 0}, {"x": 6}], [0.0, 6.0])
+    # 0 dominates 6, which dominates 2. Removing both observed points promotes
+    # 2 from the third front to the first, alongside 1 and ahead of 3.
+    scores = torch.tensor(
+        [[0, 1, 0], [2, 0, 0], [1, 2, 0], [3, 0, 0], [3, 3, 3], [4, 4, 4], [0, 2, 0]],
+        dtype=optimizer.dtype,
+    )
+
+    def objective(
+        self: MACEEvaluator, continuous: torch.Tensor, categorical: torch.Tensor
+    ) -> torch.Tensor:
+        return scores[continuous[:, 0].long()]
+
+    monkeypatch.setattr(MACEEvaluator, "__call__", objective)
+    assert optimizer.suggest(1).to_records() == [{"x": 1}]
+    for count in (2, 3):
+        assert {row["x"] for row in optimizer.suggest(count).to_records()} == set(
+            range(1, count + 1)
+        )
+    assert optimizer._sobol_draw_count == 0
+
+
+@pytest.mark.parametrize("parameter", [Float("x", 0.0, 1.0), Integer("x", 0, 1000)])
+def test_batch_explores_beyond_a_nonexhausted_population(
+    monkeypatch: pytest.MonkeyPatch, parameter: Float | Integer
+) -> None:
+    optimizer = LeanHEBO(
+        Space(parameter),
+        config=LeanHEBOConfig(
+            random_samples=2,
+            runtime=RuntimeConfig(seed=7),
+            gp=GPConfig(initial_steps=0),
+            search=SearchConfig(population_size=7, generations=1),
+        ),
+    )
+    optimizer.observe([{"x": 0}, {"x": 1}], [0.0, 1.0])
+
+    def objective(
+        self: MACEEvaluator, continuous: torch.Tensor, categorical: torch.Tensor
+    ) -> torch.Tensor:
+        # The observed incumbent is the only non-dominated point.
+        return continuous[:, :1].expand(-1, 3)
+
+    monkeypatch.setattr(MACEEvaluator, "__call__", objective)
+    assert len(optimizer.suggest(3)) == 3
+    assert optimizer.last_search is not None and optimizer.last_search.generations == 1
+    assert optimizer._sobol_draw_count == 3
 
 
 def test_posterior_numerical_failure_is_not_retried(

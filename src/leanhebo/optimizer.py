@@ -29,6 +29,7 @@ from leanhebo.search.conditional import (
 )
 from leanhebo.search.nsga2 import NSGA2Result, TorchNSGA2
 from leanhebo.search.repair import MixedVariableSpec
+from leanhebo.search.sorting import _non_dominated_sort_unchecked
 from leanhebo.space import (
     Bool,
     Categorical,
@@ -355,18 +356,8 @@ class LeanHEBO:
             if self.config.search.reuse_previous_population
             else None
         )
-        # A non-empty population always has a rank-zero front.
-        pool = result.pareto_population
-        candidates = self.space.encoded_from_dense(pool, fixed=fixed)
-        candidates = candidates.select(self.store.unique_mask(candidates))
-        if len(candidates):
-            with self.diagnostics.phase("suggest.selection"):
-                selected_indices = self._selection_indices(
-                    candidates, min(n_suggestions, len(candidates)), posterior
-                )
-                selected = self.space.decode(candidates.select(selected_indices), fixed=fixed)
-        else:
-            selected = None
+        with self.diagnostics.phase("suggest.selection"):
+            selected = self._select_candidates(result, n_suggestions, fixed, posterior)
         with self.diagnostics.phase("suggest.uniqueness"):
             return self._fill_unique(selected, n_suggestions, fixed)
 
@@ -456,45 +447,74 @@ class LeanHEBO:
             fixed_values=fixed_values,
         )
 
-    def _selection_indices(
-        self, candidates: EncodedBatch, count: int, posterior: PosteriorEvaluator
+    def _select_candidates(
+        self,
+        result: NSGA2Result,
+        count: int,
+        fixed: FixedInput | None,
+        posterior: PosteriorEvaluator,
+    ) -> EncodedBatch:
+        # An exhausted search has no distinct offspring left. Otherwise, use Sobol
+        # for any slots the first front leaves open so the batch explores new points.
+        exhausted = result.generations < self.config.search.generations
+        order = (
+            torch.argsort(result.ranks, stable=True)
+            if exhausted
+            else torch.where(result.ranks == 0)[0]
+        )
+        population = self.space.encoded_from_dense(result.population[order], fixed=fixed)
+        unseen = self.store.unique_mask(population)
+        candidates = population.select(unseen)
+        rows = order[unseen]
+        ranks = result.ranks[rows]
+        first = torch.where(ranks == 0)[0]
+        if not exhausted or first.numel() >= count:
+            front = candidates.select(first)
+            return front.select(self._front_indices(front, min(count, len(front)), posterior))
+        if len(candidates) <= count:
+            return candidates
+
+        # Keep the available original front and fill its missing slots by Pareto
+        # rank among unseen candidates. An observed dominator can hide a good point.
+        if len(candidates) != len(population):
+            ranks, _ = _non_dominated_sort_unchecked(result.objectives[rows], stop_after=count)
+            ranks[first] = -1
+        cutoff = ranks.kthvalue(count).values
+        better = torch.where(ranks < cutoff)[0]
+        boundary = torch.where(ranks == cutoff)[0]
+        remaining = count - better.numel()
+        if remaining < boundary.numel():
+            order = self._front_indices(candidates.select(boundary), remaining, posterior)
+            boundary = boundary[order]
+        return candidates.select(torch.cat((better, boundary)))
+
+    def _front_indices(
+        self, front: EncodedBatch, count: int, posterior: PosteriorEvaluator
     ) -> torch.Tensor:
-        population = len(candidates)
-        if count < 1 or count > population:
-            raise ValueError("invalid candidate selection count")
-        stats = (
-            posterior.evaluate(candidates.continuous, candidates.categorical) if count > 2 else None
-        )
-        random_order = torch.randperm(
-            population,
-            device=candidates.continuous.device,
-            generator=self.random.selection,
-        ).tolist()
-        selected: list[int] = []
-        if stats is not None:
-            selected.append(int(stats.stddev.argmax().item()))
-            best_mean = int(stats.mean.argmin().item())
-            if best_mean not in selected:
-                selected.append(best_mean)
-        selected.extend(index for index in random_order if index not in selected)
-        return torch.tensor(
-            selected[:count], device=candidates.continuous.device, dtype=torch.int64
-        )
+        order = torch.randperm(len(front), device=front.device, generator=self.random.selection)
+        if count > 2:
+            stats = posterior.evaluate(front.continuous, front.categorical)
+            anchors = torch.unique_consecutive(
+                torch.stack((stats.stddev.argmax(), stats.mean.argmin()))
+            )
+            order = torch.cat((anchors, order[~torch.isin(order, anchors)]))
+        return order[:count]
 
     def _fill_unique(
         self,
-        existing: CandidateBatch | None,
+        existing: EncodedBatch | None,
         requested: int,
         fixed: FixedInput | None,
     ) -> CandidateBatch:
         encoded_rows: list[EncodedBatch] = []
         seen: set[tuple[int, ...]] = set()
-        if existing is not None:
-            take = min(len(existing), requested)
-            initial = existing.select(slice(0, take))
-            encoded_rows.append(initial.encoded)
-            seen.update(self.space.canonical_keys(initial))
-        retained = sum(len(batch) for batch in encoded_rows)
+        retained = 0
+        if existing is not None and len(existing):
+            retained = len(existing)
+            if retained == requested:
+                return self.space.decode(existing, fixed=fixed)
+            encoded_rows.append(existing)
+            seen.update(self.space.canonical_keys(existing))
         fixed_values = {} if fixed is None else dict(fixed.decoded_values)
         finite_domain = (
             self.space.context_is_finite(fixed)
