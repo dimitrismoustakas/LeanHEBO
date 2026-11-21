@@ -241,7 +241,7 @@ def polynomial_mutation(
     upper: Tensor,
     *,
     numeric_mask: Tensor | None = None,
-    probability: float | None = None,
+    probability: float,
     eta: float = 20.0,
     generator: torch.Generator | None = None,
 ) -> Tensor:
@@ -250,9 +250,6 @@ def polynomial_mutation(
     if numeric_mask is None:
         numeric_mask = torch.ones_like(lower, dtype=torch.bool)
     mutable = numeric_mask & (upper > lower)
-    if probability is None:
-        mutable_count = int(mutable.sum().item())
-        probability = 0.0 if mutable_count == 0 else 1.0 / mutable_count
     if population.shape[0] == 0 or probability == 0:
         return population.clone()
 
@@ -288,16 +285,13 @@ def categorical_mutation(
     upper: Tensor,
     categorical_mask: Tensor,
     *,
-    probability: float | None = None,
+    probability: float,
     generator: torch.Generator | None = None,
 ) -> Tensor:
     """Replace selected categorical codes with a uniformly sampled alternative code."""
 
     counts = torch.round(upper - lower + 1.0).to(torch.long)
     mutable = categorical_mask & (counts > 1)
-    if probability is None:
-        mutable_count = int(mutable.sum().item())
-        probability = 0.0 if mutable_count == 0 else 1.0 / mutable_count
     if population.shape[0] == 0 or probability == 0:
         return population.clone()
 
