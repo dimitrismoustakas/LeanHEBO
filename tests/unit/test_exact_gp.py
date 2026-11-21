@@ -8,7 +8,7 @@ import torch
 
 from leanhebo.config import GPConfig, RuntimeConfig
 from leanhebo.errors import NumericalError
-from leanhebo.gp import ExactGPSurrogate
+from leanhebo.gp import ConditionalExactGPSurrogate, ExactGPSurrogate
 from leanhebo.gp.kernel import (
     MixedFeatureExtractor,
     build_base_kernel,
@@ -16,6 +16,7 @@ from leanhebo.gp.kernel import (
     initialize_base_numeric_lengthscales,
 )
 from leanhebo.runtime.rng import make_generator
+from leanhebo.space import Bool, Eq, Float, Space
 
 
 def _surrogate(*, categories: tuple[int, ...] = ()) -> ExactGPSurrogate:
@@ -570,25 +571,43 @@ def test_scheduled_full_refit_cadence_resets_after_each_refit() -> None:
     assert gp.updates_since_full_refit == 1
 
 
+def _adam_training_case(
+    conditional: bool, config: GPConfig
+) -> tuple[ExactGPSurrogate, torch.Tensor, torch.Tensor, torch.Tensor]:
+    runtime = RuntimeConfig(dtype="float64" if conditional else "float32", seed=5)
+    generator = make_generator("cpu", 5)
+    root = Float("root", 0.0, 1.0)
+    gp: ExactGPSurrogate
+    if conditional:
+        space = Space(
+            root, Bool("enabled"), Float("child", 0.0, 1.0, active_when=Eq("enabled", True))
+        ).compile(dtype=runtime.dtype)
+        gp = ConditionalExactGPSurrogate(
+            space=space, config=config, runtime=runtime, generator=generator
+        )
+    else:
+        space = Space(root).compile(dtype=runtime.dtype)
+        gp = ExactGPSurrogate(
+            num_continuous=1, category_sizes=(), config=config, runtime=runtime, generator=generator
+        )
+    points = space.sample(5, seed=5)
+    return gp, points.continuous, points.categorical, points.continuous[:, 0].square()
+
+
+@pytest.mark.parametrize("conditional", [False, True], ids=["flat", "conditional"])
 def test_default_update_avoids_adam_snapshot_and_full_refit_resets_state(
-    monkeypatch: pytest.MonkeyPatch,
+    conditional: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    gp = ExactGPSurrogate(
-        num_continuous=1,
-        category_sizes=(),
-        config=GPConfig(
+    gp, continuous, categorical, targets = _adam_training_case(
+        conditional,
+        GPConfig(
             initial_steps=1,
             update_steps=1,
             full_refit_interval=2,
             full_refit_growth_factor=None,
             kernel_initialization_samples=16,
         ),
-        runtime=RuntimeConfig(seed=5),
-        generator=make_generator("cpu", 5),
     )
-    continuous = torch.linspace(0, 1, 5).reshape(-1, 1)
-    categorical = torch.empty((5, 0), dtype=torch.long)
-    targets = torch.sin(continuous[:, 0])
 
     gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
     assert gp.optimizer is not None
@@ -611,11 +630,11 @@ def test_default_update_avoids_adam_snapshot_and_full_refit_resets_state(
     assert {int(state["step"].item()) for state in gp.optimizer.state.values()} == {1}
 
 
-def test_reconstructed_warm_update_transfers_adam_state() -> None:
-    gp = ExactGPSurrogate(
-        num_continuous=1,
-        category_sizes=(),
-        config=GPConfig(
+@pytest.mark.parametrize("conditional", [False, True], ids=["flat", "conditional"])
+def test_reconstructed_warm_update_transfers_adam_state(conditional: bool) -> None:
+    gp, continuous, categorical, targets = _adam_training_case(
+        conditional,
+        GPConfig(
             initial_steps=1,
             update_steps=1,
             full_refit_interval=None,
@@ -623,17 +642,12 @@ def test_reconstructed_warm_update_transfers_adam_state() -> None:
             use_set_train_data=False,
             kernel_initialization_samples=16,
         ),
-        runtime=RuntimeConfig(seed=5),
-        generator=make_generator("cpu", 5),
     )
-    continuous = torch.linspace(0, 1, 4).reshape(-1, 1)
-    categorical = torch.empty((4, 0), dtype=torch.long)
-    targets = continuous[:, 0].square()
     gp.fit(continuous[:3], categorical[:3], targets[:3], transform_version=1)
     assert gp.optimizer is not None
     optimizer = gp.optimizer
 
-    gp.fit(continuous, categorical, targets, transform_version=1)
+    gp.fit(continuous[:4], categorical[:4], targets[:4], transform_version=1)
 
     assert gp.optimizer is not None and gp.optimizer is not optimizer
     assert {int(state["step"].item()) for state in gp.optimizer.state.values()} == {2}
