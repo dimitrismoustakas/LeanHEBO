@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
+from collections.abc import Iterable
+
 import torch
 from torch import Tensor
 
@@ -19,12 +22,56 @@ def _dominance_matrix_unchecked(objectives: Tensor) -> Tensor:
     return no_worse & ~no_worse.mT
 
 
+def _weak_prefix_masks(values: Iterable[float]) -> dict[float, int]:
+    """Map each value to a bit set of points with an equal or smaller value."""
+    masks: dict[float, int] = {}
+    for index, value in enumerate(values):
+        masks[value] = masks.get(value, 0) | (1 << index)
+    prefix = 0
+    for value in sorted(masks):
+        prefix |= masks[value]
+        masks[value] = prefix
+    return masks
+
+
+def _rank_three_objectives_cpu(
+    objectives: Tensor, stop_after: int | None
+) -> tuple[Tensor, int | None]:
+    """Rank MACE's objective triples in lexicographic order."""
+    rows = [tuple(row) for row in objectives.tolist()]
+    ordered = sorted(set(rows))
+    no_worse_y = _weak_prefix_masks(row[1] for row in ordered)
+    no_worse_z = _weak_prefix_masks(row[2] for row in ordered)
+    front_masks: list[int] = []
+    rank_by_row: dict[tuple[float, ...], int] = {}
+    for index, row in enumerate(ordered):
+        # Earlier distinct triples are already no worse on the first objective.
+        # If a front dominates this point, so does every lower front by transitivity.
+        candidates = no_worse_y[row[1]] & no_worse_z[row[2]]
+        rank = bisect_left(front_masks, True, key=lambda front: not (front & candidates))
+        if rank == len(front_masks):
+            front_masks.append(0)
+        front_masks[rank] |= 1 << index
+        rank_by_row[row] = rank
+
+    ranks = torch.tensor(
+        [rank_by_row[row] for row in rows], dtype=torch.long, device=objectives.device
+    )
+    if stop_after is not None and rows and stop_after < len(rows):
+        tail_rank = int(ranks.kthvalue(max(1, stop_after)).values) + 1
+        if tail_rank < len(front_masks):
+            return ranks.clamp_max_(tail_rank), tail_rank
+    return ranks, None
+
+
 def _non_dominated_sort_unchecked(
     objectives: Tensor,
     stop_after: int | None = None,
 ) -> tuple[Tensor, int | None]:
     """Rank an internal objective matrix, optionally replacing unused tail ranks by a sentinel."""
 
+    if objectives.device.type == "cpu" and objectives.shape[1] == 3:
+        return _rank_three_objectives_cpu(objectives, stop_after)
     dominates = _dominance_matrix_unchecked(objectives)
     population_size = dominates.shape[0]
     ranks = torch.full(

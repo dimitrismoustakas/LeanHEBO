@@ -154,9 +154,12 @@ def test_truncated_survival_matches_full_ranking_on_every_retained_point() -> No
     )
 
 
-def test_non_dominated_ranks_match_pymoo_reference() -> None:
+@pytest.mark.parametrize("tied_coordinates", [False, True])
+def test_non_dominated_ranks_match_pymoo_reference(tied_coordinates: bool) -> None:
     generator = torch.Generator().manual_seed(37)
     objectives = torch.rand((40, 3), generator=generator)
+    if tied_coordinates:
+        objectives = (objectives * 3).round()
     objectives[5] = objectives[4]
 
     pymoo_fronts = NonDominatedSorting().do(objectives.numpy())
@@ -166,3 +169,8 @@ def test_non_dominated_ranks_match_pymoo_reference() -> None:
 
     ranks, _ = _non_dominated_sort_unchecked(objectives)
     assert torch.equal(ranks, expected)
+    for count in range(1, len(expected) + 1):
+        cutoff = int(expected.kthvalue(count).values)
+        truncated, tail = _non_dominated_sort_unchecked(objectives, stop_after=count)
+        assert tail == (cutoff + 1 if cutoff < expected.max() else None)
+        assert torch.equal(truncated, expected.clamp_max(cutoff + 1))
