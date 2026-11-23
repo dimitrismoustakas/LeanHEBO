@@ -27,7 +27,7 @@ from leanhebo.search.conditional import (
     ConditionalTorchNSGA2,
     eliminate_semantic_duplicates,
 )
-from leanhebo.search.nsga2 import NSGA2Result, TorchNSGA2
+from leanhebo.search.nsga2 import NSGA2Result, TorchNSGA2, _SobolPopulationSampler
 from leanhebo.search.repair import MixedVariableSpec
 from leanhebo.search.sorting import _non_dominated_sort_unchecked
 from leanhebo.space import (
@@ -340,14 +340,16 @@ class LeanHEBO:
             )
         else:
             search = TorchNSGA2(search_spec, **search_options)
-        previous = (
-            self._previous_population if self.config.search.reuse_previous_population else None
-        )
         with self.diagnostics.phase("suggest.search.total"):
+            initial_population = None
+            if self.config.search.reuse_previous_population:
+                initial_population = self._previous_population
+            elif self.space.is_conditional and fixed is None and n_suggestions == 1:
+                initial_population = self._differential_seeds(search_spec)
             result = search.minimize(
                 objective,
                 incumbents=self.space.to_dense(incumbent),
-                initial_population=previous,
+                initial_population=initial_population,
                 generator=self.random.search,
             )
         self._last_search = result
@@ -360,6 +362,58 @@ class LeanHEBO:
             selected = self._select_candidates(result, n_suggestions, fixed, posterior)
         with self.diagnostics.phase("suggest.uniqueness"):
             return self._fill_unique(selected, n_suggestions, fixed)
+
+    def _differential_seeds(self, spec: MixedVariableSpec) -> torch.Tensor:
+        """Seed half the search around observed points using donors with the same activity."""
+        semantics = self.space.conditional_semantics
+        assert semantics is not None
+        data = self.store._materialize_view()
+        count = self.config.search.population_size // 2
+        generator = self.random.search
+        latent = _SobolPopulationSampler(spec, generator).draw(count)
+        activity = semantics.activity(data.encoded)
+        _, patterns = torch.unique(activity.group, dim=0, return_inverse=True)
+
+        elite_count = math.ceil(math.sqrt(len(data)))
+        elite = data.y.reshape(-1).argsort(stable=True)[:elite_count]
+        anchors = elite[
+            torch.randint(elite_count, (count,), device=self.device, generator=generator)
+        ]
+        anchors[: count // 2] = elite[0]
+        dense = data.encoded.to_dense()
+        dense_order = (
+            semantics.continuous_parameter_indices + semantics.categorical_parameter_indices
+        )
+        active = activity.parameter[anchors][:, dense_order]
+        # Give inactive coordinates fresh values in case a later mutation activates them.
+        seeds = torch.where(active, dense[anchors], latent)
+
+        numeric = self.space.n_continuous
+        anchor_patterns = patterns[anchors]
+        for pattern in anchor_patterns.unique():
+            donors = (patterns == pattern).nonzero().flatten()
+            if len(donors) < 2:
+                continue
+            targets = (anchor_patterns == pattern).nonzero().flatten()
+            first = torch.randint(
+                len(donors), (len(targets),), device=self.device, generator=generator
+            )
+            offset = torch.randint(
+                1, len(donors), (len(targets),), device=self.device, generator=generator
+            )
+            donor_a = dense[donors[first]]
+            donor_b = dense[donors[(first + offset) % len(donors)]]
+            scale = torch.rand(
+                (len(targets), 1), dtype=self.dtype, device=self.device, generator=generator
+            )
+            # Copy donor categories. Numeric coordinates follow a scaled donor difference.
+            proposal = donor_a.clone()
+            proposal[:, :numeric] = seeds[targets, :numeric] + scale * (
+                donor_a[:, :numeric] - donor_b[:, :numeric]
+            )
+            take = torch.rand(proposal.shape, device=self.device, generator=generator) < 0.5
+            seeds[targets] = torch.where(take & active[targets], proposal, seeds[targets])
+        return seeds
 
     def _incumbent(self, fixed: FixedInput | None) -> CandidateBatch:
         observations = self.store._materialize_view()

@@ -97,6 +97,34 @@ def test_fixed_child_makes_the_context_finite_without_forcing_its_parent() -> No
         optimizer.suggest(1, fix_input={"child": 0.375})
 
 
+def test_differential_seeds_draw_donors_only_from_the_anchor_activity() -> None:
+    optimizer = LeanHEBO(
+        Space(
+            Categorical("branch", ("left", "right")),
+            Float("x", 0.0, 1.0, active_when=Eq("branch", "left")),
+            Float("y", 0.0, 1.0, active_when=Eq("branch", "right")),
+        ),
+        config=LeanHEBOConfig(search=SearchConfig(population_size=64, seed=17)),
+    )
+    optimizer.observe(
+        [
+            {"branch": "left", "x": 0.25},
+            {"branch": "right", "y": 0.875},
+            {"branch": "left", "x": 0.5},
+            {"branch": "left", "x": 0.75},
+        ],
+        [0.0, 1.0, 2.0, 3.0],
+    )
+    spec = optimizer._base_search_spec
+    assert spec is not None
+    seeds = optimizer.space.candidate_from_dense(optimizer._differential_seeds(spec)).to_records()
+    assert len(seeds) == 32
+    assert all(row["branch"] == "left" for row in seeds[:16])
+    assert any(row["branch"] == "left" and row["x"] not in (0.25, 0.5, 0.75) for row in seeds)
+    right_seeds = [row for row in seeds if row["branch"] == "right"]
+    assert right_seeds and all(row == {"branch": "right", "y": 0.875} for row in right_seeds)
+
+
 def test_contextual_incumbent_ignores_a_fixed_child_while_it_is_inactive() -> None:
     optimizer = LeanHEBO(
         Space(
