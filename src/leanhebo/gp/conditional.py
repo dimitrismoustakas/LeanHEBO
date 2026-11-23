@@ -142,13 +142,13 @@ class _MaskedMinMaxScaler(_ResizableBufferModule):
         negative_inf = torch.full((), -torch.inf, dtype=x.dtype, device=x.device)
         data_min = torch.where(mask, x, positive_inf).amin(dim=0)
         data_max = torch.where(mask, x, negative_inf).amax(dim=0)
-        valid = count > 0
-        data_min = torch.where(valid, data_min, self.domain_lower)
-        data_max = torch.where(valid, data_max, self.domain_upper)
-        data_range = data_max - data_min
-        near_constant = data_range.abs() <= (10 * torch.finfo(x.dtype).eps)
-        denominator = torch.where(near_constant, torch.ones_like(data_range), data_range)
-        scale = 2.0 / denominator
+        domain_range = self.domain_upper - self.domain_lower
+        # Until active observations span a meaningful fraction of the domain,
+        # keep distances in domain units, including after the first observation.
+        has_range = data_max - data_min > (10 * torch.finfo(x.dtype).eps) * domain_range
+        data_min = torch.where(has_range, data_min, self.domain_lower)
+        data_max = torch.where(has_range, data_max, self.domain_upper)
+        scale = 2.0 / (data_max - data_min)
         offset = -1.0 - data_min * scale
         self.data_min_ = data_min
         self.data_max_ = data_max

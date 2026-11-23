@@ -367,6 +367,30 @@ def test_conditional_surrogate_derives_activity_and_masks_scaling() -> None:
     torch.testing.assert_close(covariance.diagonal(), expected_diagonal, rtol=0.0, atol=0.0)
 
 
+@pytest.mark.parametrize("active_values", [(0.5,), (0.5, 0.5), (0.25, 0.75)])
+def test_conditional_child_units_preserve_the_posterior(active_values: tuple[float, ...]) -> None:
+    predictions = []
+    for unit in (1.0, 1000.0, 1e-16):
+        space = CompiledSpace(
+            (Bool("on"), Float("child", 0.0, unit, active_when=Eq("on", True))),
+            dtype=torch.float64,
+        )
+        surrogate = _surrogate(space)
+        observations = space.encode(
+            [{"on": False}, *({"on": True, "child": x * unit} for x in active_values)]
+        )
+        targets = torch.tensor([-0.5, *active_values], dtype=torch.float64)
+        surrogate.fit(
+            observations.continuous, observations.categorical, targets, transform_version=0
+        )
+        query = space.encode([{"on": True, "child": x * unit} for x in (0.25, 0.5, 0.75)])
+        mean, variance, _ = surrogate.predict(query.continuous, query.categorical)
+        predictions.append((mean, variance))
+
+    for prediction in predictions[1:]:
+        torch.testing.assert_close(prediction, predictions[0])
+
+
 def test_unobserved_group_uses_compiled_bounds_and_predicts_finitely() -> None:
     space = _branch_space()
     surrogate = _surrogate(space)
