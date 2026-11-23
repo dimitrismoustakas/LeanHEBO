@@ -447,6 +447,17 @@ class ExactGPSurrogate:
             loss: torch.Tensor = -mll(distribution, self.train_targets)
         return loss
 
+    def _marginal_posterior(
+        self, inputs: tuple[torch.Tensor, ...], *, eager: bool
+    ) -> gpytorch.distributions.MultivariateNormal:
+        """Posterior used only for its per-candidate mean and variance."""
+        assert self.model is not None
+        if self.device.type == "cuda" and eager:
+            # A single small joint evaluation avoids duplicate CUDA launches.
+            with gpytorch.settings.lazily_evaluate_kernels(False):
+                return self.model(*inputs)
+        return self.model(*inputs)
+
     @torch.inference_mode()
     def predict(
         self,
@@ -491,12 +502,9 @@ class ExactGPSurrogate:
             # Preserve the model's empty-posterior path for an empty query batch.
             for start in range(0, max(1, inputs[0].shape[0]), chunk_size):
                 chunk = tuple(value[start : start + chunk_size] for value in inputs)
-                if self.device.type == "cuda" and train_count + chunk[0].shape[0] <= eager_size:
-                    # A single small joint evaluation avoids duplicate CUDA launches.
-                    with gpytorch.settings.lazily_evaluate_kernels(False):
-                        distribution = self.model(*chunk)
-                else:
-                    distribution = self.model(*chunk)
+                distribution = self._marginal_posterior(
+                    chunk, eager=train_count + chunk[0].shape[0] <= eager_size
+                )
                 if self.config.predict_observation_noise:
                     distribution = self.likelihood(distribution)
                 means.append(distribution.mean.reshape(-1))

@@ -34,12 +34,14 @@ def _surrogate(
     space: CompiledSpace,
     *,
     seed: int = 7,
+    predict_noise: bool = False,
 ) -> ConditionalExactGPSurrogate:
     return ConditionalExactGPSurrogate(
         space=space,
         config=GPConfig(
             initial_steps=2,
             update_steps=1,
+            predict_observation_noise=predict_noise,
             full_refit_interval=None,
             full_refit_growth_factor=None,
         ),
@@ -59,11 +61,13 @@ def test_layout_requires_an_exact_partition() -> None:
         layout.validate(num_continuous=2, num_categorical=0)
 
 
-def test_warm_conditional_prediction_avoids_joint_covariance(
+@pytest.mark.parametrize("predict_noise", [False, True])
+def test_warm_conditional_prediction_evaluates_only_cross_covariance(
     monkeypatch: pytest.MonkeyPatch,
+    predict_noise: bool,
 ) -> None:
     space = _branch_space()
-    surrogate = _surrogate(space)
+    surrogate = _surrogate(space, predict_noise=predict_noise)
     train = space.encode(
         [
             {"kind": "plain", "root": 0.0},
@@ -81,9 +85,8 @@ def test_warm_conditional_prediction_avoids_joint_covariance(
     )
     targets = torch.tensor([1.0, 1.2, 0.4, 0.1], dtype=torch.float64)
     surrogate.fit(train.continuous, train.categorical, targets, transform_version=0)
-    surrogate.predict(query.continuous, query.categorical)  # Populate training caches.
-    with gpytorch.settings.lazily_evaluate_kernels(False):
-        expected = surrogate.predict(query.continuous, query.categorical)
+    # The first prediction builds the training cache using GPyTorch's full posterior.
+    expected = surrogate.predict(query.continuous, query.categorical)
 
     assert surrogate.model is not None
     kernel = surrogate.model.covar_module.base_kernel
@@ -99,10 +102,7 @@ def test_warm_conditional_prediction_avoids_joint_covariance(
     with gpytorch.settings.lazily_evaluate_kernels(True):
         actual = surrogate.predict(query.continuous, query.categorical)
 
-    train_count, joint_count = len(train.continuous), len(train.continuous) + len(query.continuous)
-    assert shapes
-    assert (train_count, train_count) not in shapes
-    assert (joint_count, joint_count) not in shapes
+    assert shapes == [(len(query.continuous), len(train.continuous))]
     for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
         torch.testing.assert_close(actual_tensor, expected_tensor, rtol=0.0, atol=0.0)
 

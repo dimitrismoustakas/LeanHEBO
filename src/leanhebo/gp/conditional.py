@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import gpytorch  # type: ignore[import-untyped]
 import torch
+from linear_operator.operators import DiagLinearOperator  # type: ignore[import-untyped]
 
 from leanhebo.config import GPConfig, RuntimeConfig
 from leanhebo.data import EncodedBatch
@@ -318,6 +319,32 @@ class ConditionalExactGPSurrogate(ExactGPSurrogate):
             layout=self.layout,
             ard=self.config.ard,
         )
+
+    def _marginal_posterior(
+        self, inputs: tuple[torch.Tensor, ...], *, eager: bool
+    ) -> gpytorch.distributions.MultivariateNormal:
+        model = cast(_ConditionalExactGP, self.model)
+        strategy = model.prediction_strategy
+        if (
+            self.device.type != "cpu"
+            or not eager
+            or not inputs[0].shape[0]
+            or strategy is None
+            or gpytorch.settings.fast_pred_var.off()
+            or gpytorch.settings.prior_mode.on()
+            or gpytorch.settings.skip_posterior_variances.on()
+        ):
+            return super()._marginal_posterior(inputs, eager=eager)
+
+        query = model.activity_kernel.pack_inputs(*inputs)
+        train = model.activity_kernel.pack_inputs(*model.train_inputs)
+        cross = model.covar_module(query, train).to_dense()
+        mean = strategy.exact_predictive_mean(model.mean_module(query), cross)
+        # Use the same dense variance correction as GPyTorch. Only the diagonal
+        # of the conditional kernel on the queries is needed for the result.
+        root = cross @ strategy.covar_cache
+        variance = model.covar_module(query, diag=True) - (root @ root.T).diagonal()
+        return gpytorch.distributions.MultivariateNormal(mean, DiagLinearOperator(variance))
 
     def _initialize_kernel(self, model: gpytorch.models.ExactGP) -> None:
         assert self.train_continuous is not None

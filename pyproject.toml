@@ -19,6 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "gpytorch>=1.14",
+    "linear-operator>=0.6",
     "numpy>=2.0",
     "torch>=2.5",
 ]

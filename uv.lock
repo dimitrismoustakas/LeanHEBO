@@ -715,6 +715,7 @@ version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "gpytorch" },
+    { name = "linear-operator" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "torch" },
@@ -736,6 +737,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "gpytorch", specifier = ">=1.14" },
+    { name = "linear-operator", specifier = ">=0.6" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "torch", specifier = ">=2.5" },
 ]
