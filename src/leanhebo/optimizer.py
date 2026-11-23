@@ -6,9 +6,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
-from itertools import islice
+from itertools import islice, tee
 from pathlib import Path
 from typing import Any, Self
 
@@ -43,6 +43,23 @@ from leanhebo.space import (
 from leanhebo.transforms import OutputTransform
 
 
+def _finite_batches(
+    space: CompiledSpace,
+    fixed: FixedInput | None,
+    chunk_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Iterator[torch.Tensor]:
+    if not space.context_is_finite(fixed):
+        return
+    records = space.iter_contextual_records(fixed)
+    while chunk := list(islice(records, chunk_size)):
+        encoded = space.encode(chunk).to(device, dtype=dtype)
+        if fixed is not None:
+            encoded = space.apply_fixed(encoded, fixed)
+        yield encoded.to_dense()
+
+
 class _CompiledConditionalSearchSemantics:
     """Bind compiled conditional semantics and a fixed context to one search call."""
 
@@ -59,6 +76,8 @@ class _CompiledConditionalSearchSemantics:
         self.space = space
         self.fixed = fixed
         self._semantics = semantics
+        self._completion_key: tuple[int, torch.device, torch.dtype] | None = None
+        self._completion_batches: Iterator[torch.Tensor] = iter(())
         dense_parameter_indices = (
             semantics.continuous_parameter_indices + semantics.categorical_parameter_indices
         )
@@ -83,21 +102,19 @@ class _CompiledConditionalSearchSemantics:
         return self._semantics.key_tensor(self._encoded(population))
 
     def finite_completion(self, count: int, *, existing: torch.Tensor) -> torch.Tensor:
-        if count <= 0 or not self.space.context_is_finite(self.fixed):
-            return existing.new_empty((0, self.space.dense_dimension))
-
         completed = existing.new_empty((0, self.space.dense_dimension))
-        records = self.space.iter_contextual_records(self.fixed)
-        chunk_size = max(64, min(1024, count * 4))
-        while completed.shape[0] < count:
-            chunk = list(islice(records, chunk_size))
-            if not chunk:
-                break
-            encoded = self.space.encode(chunk).to(existing.device, dtype=existing.dtype)
-            if self.fixed is not None:
-                encoded = self.space.apply_fixed(encoded, self.fixed)
+        if count <= 0:
+            return completed
+        key = (max(64, min(1024, count * 4)), existing.device, existing.dtype)
+        if key != self._completion_key:
+            self._completion_batches = _finite_batches(self.space, self.fixed, *key)
+            self._completion_key = key
+        # Each generation starts at the same first configuration. Replay the encoded
+        # prefix and extend it only when this generation needs additional candidates.
+        self._completion_batches, batches = tee(self._completion_batches)
+        for batch in batches:
             candidates = eliminate_semantic_duplicates(
-                encoded.to_dense(),
+                batch,
                 self,
                 existing=torch.cat((existing, completed), dim=0),
             )
@@ -105,6 +122,8 @@ class _CompiledConditionalSearchSemantics:
                 (completed, candidates[: count - completed.shape[0]]),
                 dim=0,
             )
+            if completed.shape[0] == count:
+                break
         return completed
 
 

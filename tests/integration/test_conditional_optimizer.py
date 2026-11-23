@@ -11,6 +11,7 @@ from leanhebo import LeanHEBO
 from leanhebo.config import GPConfig, LeanHEBOConfig, RuntimeConfig, SearchConfig, WarpConfig
 from leanhebo.errors import SearchSpaceExhaustedError
 from leanhebo.gp import ConditionalExactGPSurrogate
+from leanhebo.optimizer import _CompiledConditionalSearchSemantics
 from leanhebo.space import Categorical, Eq, Float, In, Integer, Space
 
 
@@ -95,6 +96,21 @@ def test_fixed_child_makes_the_context_finite_without_forcing_its_parent() -> No
     optimizer.observe(candidates, torch.tensor([0.0, 1.0]))
     with pytest.raises(SearchSpaceExhaustedError, match=r"only 0 unseen"):
         optimizer.suggest(1, fix_input={"child": 0.375})
+
+
+def test_finite_completion_replays_and_extends_the_same_ordered_domain() -> None:
+    space = Space(
+        Categorical("branch", ("on", "off")),
+        Integer("count", 1, 130, log=True, active_when=Eq("branch", "on")),
+        Float("scale", 0.0, 1.0, active_when=Eq("branch", "on")),
+    ).compile()
+    fixed = space.compile_fixed({"scale": 0.25})
+    domain = space.apply_fixed(space.encode(list(space.iter_contextual_records(fixed))), fixed)
+    rows = domain.to_dense()
+    search = _CompiledConditionalSearchSemantics(space, fixed, device=rows.device)
+    for skip, count in ((0, 3), (67, 2), (0, 5), (126, 12), (3, 20), (131, 1)):
+        selected = search.finite_completion(count, existing=rows[:skip])
+        assert torch.equal(selected, rows[skip : skip + count])
 
 
 def test_contextual_incumbent_ignores_a_fixed_child_while_it_is_inactive() -> None:
