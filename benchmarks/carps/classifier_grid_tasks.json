@@ -1,0 +1,5 @@
+[
+  {"name": "classifier_grid/breast_cancer", "n_trials": 48},
+  {"name": "classifier_grid/wine", "n_trials": 48},
+  {"name": "classifier_grid/digits", "n_trials": 48}
+]

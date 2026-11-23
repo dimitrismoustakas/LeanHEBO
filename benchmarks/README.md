@@ -38,6 +38,10 @@ Pass a list with `--tasks`; each entry needs only `name` and `n_trials`.
 - [Classifier selection](carps/classifier_tasks.json) trains four alternative learners on the
   bundled breast cancer, wine and digits datasets. Each configuration is scored on three fixed
   stratified folds by summing squared probability errors over classes and averaging over samples.
+- The [finite classifier tasks](carps/classifier_grid_tasks.json) use those same folds and Brier
+  score. Each dataset has 192 nearest-neighbor configurations and 192 decision-tree configurations.
+  Task setup trains and scores every configuration once per dataset per process. Optimizers query
+  the resulting table, and the analysis plots regret against the exact grid minimum.
 - [Synthetic diagnostics](carps/synthetic_tasks.json): activation, shared roots, eight exclusive
   branches, a narrow active region (`gate > 0.9`), and mixed log/integer parameters. Each objective
   is a sum of nonnegative offsets and weighted squares, with an attainable minimum of zero.
@@ -54,7 +58,8 @@ probability averages 20 budget fractions from 5% to 100%. This uses the
 [probability of improvement](https://github.com/google-research/rliable#probability-of-improvement)
 metric; it measures how often an optimizer wins without normalizing task costs.
 Per-task plots show median and interquartile range of native cost, or regret against the known
-optimum for BBOB and synthetic tasks. The table also gives median paired cost differences.
+optimum for BBOB, synthetic and finite classifier tasks. The table also gives median paired cost
+differences.
 
 Failed runs carry their best evaluated cost through the remaining budget and count as failures.
 A run with no evaluated point has infinite cost. Timing includes only task/seed pairs completed

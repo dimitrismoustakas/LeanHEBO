@@ -33,6 +33,11 @@ def make_task(name: str, n_trials: int, seed: int, metric: str | None = None) ->
 
         objective = ClassifierSelection(parts[0], seed)
         metric = "brier"
+    elif family == "classifier_grid":
+        from leanhebo_carps.classifier_grid import ClassifierGrid
+
+        objective = ClassifierGrid(parts[0], seed)
+        metric = "brier"
     else:
         raise ValueError(f"Unknown task family: {family}")
     return Task(
