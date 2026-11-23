@@ -184,3 +184,30 @@ def test_synthetic_minimum_and_inactive_invariance(name):
         values.update(dict(sample))
         dense = Configuration(objective.configspace, values=values, allow_inactive_with_values=True)
         assert objective.evaluate(TrialInfo(config=dense)).cost == actual
+
+
+@pytest.mark.parametrize("dataset", ["breast_cancer", "wine"])
+def test_classifier_brier_matches_out_of_fold_probabilities(dataset):
+    import numpy as np
+    from ConfigSpace import Configuration
+    from sklearn.datasets import load_breast_cancer, load_wine
+    from sklearn.model_selection import StratifiedKFold, cross_val_predict
+    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    load = {"breast_cancer": load_breast_cancer, "wine": load_wine}[dataset]
+    x, y = load(return_X_y=True)
+    model = make_pipeline(StandardScaler(), KNeighborsClassifier(n_neighbors=5, p=1))
+    predictions = cross_val_predict(
+        model, x, y, cv=StratifiedKFold(3, shuffle=True, random_state=1147), method="predict_proba"
+    )
+    expected = np.square(predictions - np.eye(len(np.unique(y)))[y]).sum(axis=1).mean()
+    values = {"learner": "knn", "scaler": "standard", "neighbors": 5, "p": 1, "weights": "uniform"}
+    for seed in (7, 23):
+        task = make_task("classifier/" + dataset, 60, seed)
+        assert tuple(task.output_space.objectives) == ("brier",)
+        trial = TrialInfo(config=Configuration(task.input_space.configuration_space, values=values))
+        assert task.objective_function.evaluate(trial).cost == pytest.approx(
+            expected, rel=0, abs=1e-12
+        )

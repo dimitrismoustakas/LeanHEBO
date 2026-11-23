@@ -28,6 +28,11 @@ def make_task(name: str, n_trials: int, seed: int, metric: str | None = None) ->
         from leanhebo_carps.synthetic import ConditionalQuadratic
 
         objective = ConditionalQuadratic(parts[0], seed)
+    elif family == "classifier":
+        from leanhebo_carps.classifier import ClassifierSelection
+
+        objective = ClassifierSelection(parts[0], seed)
+        metric = "brier"
     else:
         raise ValueError(f"Unknown task family: {family}")
     return Task(

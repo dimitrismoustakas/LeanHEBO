@@ -35,6 +35,9 @@ Pass a list with `--tasks`; each entry needs only `name` and `n_trials`.
   LCBench `168335` still needs a HEBO comparison before deciding whether to replace it.
 - [Flat comparison](carps/tasks.json): the original 13-task CARP-S test selection.
 - [Conditional holdout](carps/conditional_tasks.json): five SVM/XGBoost tasks.
+- [Classifier selection](carps/classifier_tasks.json) trains four alternative learners on the
+  bundled breast cancer, wine and digits datasets. Each configuration is scored on three fixed
+  stratified folds by summing squared probability errors over classes and averaging over samples.
 - [Synthetic diagnostics](carps/synthetic_tasks.json): activation, shared roots, eight exclusive
   branches, a narrow active region (`gate > 0.9`), and mixed log/integer parameters. Each objective
   is a sum of nonnegative offsets and weighted squares, with an attainable minimum of zero.

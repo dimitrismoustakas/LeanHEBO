@@ -1,0 +1,5 @@
+[
+  {"name": "classifier/breast_cancer", "n_trials": 60},
+  {"name": "classifier/wine", "n_trials": 60},
+  {"name": "classifier/digits", "n_trials": 60}
+]
