@@ -16,7 +16,7 @@ import torch
 
 from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator
 from leanhebo.checkpoint import load_checkpoint, save_checkpoint
-from leanhebo.config import LeanHEBOConfig, SearchConfig
+from leanhebo.config import LeanHEBOConfig
 from leanhebo.data import CandidateBatch, EncodedBatch
 from leanhebo.data.store import ObservationStore
 from leanhebo.diagnostics import Diagnostics, FitReport
@@ -181,10 +181,7 @@ class LeanHEBO:
         self._previous_population: torch.Tensor | None = None
         self._last_search: NSGA2Result | None = None
         self._base_search_spec = self._search_spec(None) if self.space.dense_dimension else None
-        search = self.config.search
-        self._exhaustive_limit = search.exhaustive_limit
-        if self._exhaustive_limit is None:
-            self._exhaustive_limit = 2048 if search == SearchConfig(seed=search.seed) else 0
+        self._exhaustive_limit = self.config.search._resolved_exhaustive_limit(8192)
         self._finite_pools: dict[tuple[tuple[str, object], ...], EncodedBatch | None] = {}
 
     @property
@@ -823,8 +820,10 @@ class LeanHEBO:
 
     def _checkpoint_state(self) -> dict[str, Any]:
         observations = self.store._materialize_view()
+        config = self.config.to_dict()
+        config["search"]["exhaustive_limit"] = self._exhaustive_limit
         return {
-            "config": self.config.to_dict(),
+            "config": config,
             "space": self.space.to_spec(),
             "observations": {
                 "continuous": observations.continuous.detach().cpu(),
@@ -898,9 +897,11 @@ class LeanHEBO:
         state = load_checkpoint(path, map_location=map_location)
         try:
             config = LeanHEBOConfig.from_dict(state["config"])
-            if "exhaustive_limit" not in state["config"].get("search", {}):
-                # Older checkpoints were optimizing the acquisition with NSGA-II.
-                config = replace(config, search=replace(config.search, exhaustive_limit=0))
+            if config.search.exhaustive_limit is None:
+                # The first automatic cutoff was 2048. Earlier checkpoints always used NSGA-II.
+                automatic = 2048 if "exhaustive_limit" in state["config"].get("search", {}) else 0
+                limit = config.search._resolved_exhaustive_limit(automatic)
+                config = replace(config, search=replace(config.search, exhaustive_limit=limit))
             if map_location is not None:
                 config = replace(
                     config,

@@ -375,16 +375,37 @@ def test_encoded_only_fixed_context_does_not_reuse_the_unrestricted_grid() -> No
     assert opt.last_search is not None and opt.last_search.candidate_evaluations == 8
 
 
-def test_old_checkpoints_resume_evolutionary_search(tmp_path: Path) -> None:
-    space = Space(Integer("x", 0, 199))
-    optimizer = LeanHEBO(space, config=replace(_config(), search=SearchConfig(exhaustive_limit=0)))
+def test_automatic_finite_cutoff_is_inclusive_and_survives_checkpoint(tmp_path: Path) -> None:
+    config = replace(_config(acquisition_batch_size=4096), search=SearchConfig())
+    optimizer = LeanHEBO(Space(Integer("x", 1, 8192)), config=config)
+    optimizer.observe([{"x": v} for v in (2, 23, 184)], [0.1, 1.0, 0.5])
+    path = tmp_path / "finite.leanhebo"
+    optimizer.save(path)
+    restored = LeanHEBO.load(path)
+    assert restored.suggest().to_records() == optimizer.suggest().to_records()
+    result = restored.last_search
+    assert result is not None and (result.generations, result.candidate_evaluations) == (0, 8192)
+    above = LeanHEBO(Space(Integer("x", 0, 8192)), config=config)
+    assert above._finite_pool(None) is None
+
+
+@pytest.mark.parametrize("previous_limit", [0, 2048])
+def test_old_checkpoints_resume_evolutionary_search(tmp_path: Path, previous_limit: int) -> None:
+    space = Space(Integer("x", 0, max(199, previous_limit)))
+    config = replace(
+        _config(acquisition_batch_size=4096), search=SearchConfig(exhaustive_limit=previous_limit)
+    )
+    optimizer = LeanHEBO(space, config=config)
     optimizer.observe([{"x": v} for v in (2, 23, 184)], [0.1, 1.0, 0.5])
     state = optimizer._checkpoint_state()
-    del state["config"]["search"]["exhaustive_limit"]
+    if previous_limit:
+        state["config"]["search"]["exhaustive_limit"] = None
+    else:
+        del state["config"]["search"]["exhaustive_limit"]
     path = tmp_path / "old.leanhebo"
     save_checkpoint(path, state)
     restored = LeanHEBO.load(path)
-    assert restored.config.search.exhaustive_limit == 0
+    assert restored.config.search.exhaustive_limit == previous_limit
     assert restored.suggest().to_records() == optimizer.suggest().to_records()
     assert restored.last_search is not None and restored.last_search.generations > 0
 

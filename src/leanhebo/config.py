@@ -169,6 +169,11 @@ class SearchConfig:
     seed: int | None = None
     exhaustive_limit: int | None = None
 
+    def _resolved_exhaustive_limit(self, automatic: int) -> int:
+        if self.exhaustive_limit is not None:
+            return self.exhaustive_limit
+        return automatic if self == SearchConfig(seed=self.seed) else 0
+
     def __post_init__(self) -> None:
         if self.exhaustive_limit is not None and (
             isinstance(self.exhaustive_limit, bool)
