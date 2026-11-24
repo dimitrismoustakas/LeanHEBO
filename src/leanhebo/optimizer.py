@@ -642,15 +642,7 @@ class LeanHEBO:
                 return self.space.decode(existing, fixed=fixed)
             encoded_rows.append(existing)
             seen.update(self.space.canonical_keys(existing))
-        fixed_values = {} if fixed is None else dict(fixed.decoded_values)
-        finite_domain = (
-            self.space.context_is_finite(fixed)
-            if self.space.is_conditional
-            else all(
-                self._finite_cardinality(parameter, fixed_values) is not None
-                for parameter in self.space.parameters
-            )
-        )
+        finite_domain: bool | None = None
         while retained < requested:
             missing = requested - retained
             if self.space.dense_dimension == 0:
@@ -668,7 +660,18 @@ class LeanHEBO:
             for index, key in enumerate(keys):
                 if bool(historical_unique[index]) and key not in seen:
                     row = draw.select([index]).encoded
-                elif finite_domain:
+                else:
+                    if finite_domain is None:
+                        if self.space.is_conditional:
+                            finite_domain = self.space.context_is_finite(fixed)
+                        else:
+                            fixed_values = {} if fixed is None else dict(fixed.decoded_values)
+                            finite_domain = all(
+                                self._finite_cardinality(parameter, fixed_values) is not None
+                                for parameter in self.space.parameters
+                            )
+                    if not finite_domain:
+                        continue
                     if not fallback:
                         completion = self._finite_unseen(len(keys) - index, fixed, set(seen))
                         fallback = [
@@ -685,8 +688,6 @@ class LeanHEBO:
                         break
                     row, key = fallback[fallback_index]
                     fallback_index += 1
-                else:
-                    continue
                 encoded_rows.append(row)
                 seen.add(key)
                 retained += 1

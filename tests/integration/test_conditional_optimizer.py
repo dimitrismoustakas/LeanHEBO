@@ -12,7 +12,7 @@ from leanhebo.config import GPConfig, LeanHEBOConfig, RuntimeConfig, SearchConfi
 from leanhebo.errors import SearchSpaceExhaustedError
 from leanhebo.gp import ConditionalExactGPSurrogate
 from leanhebo.optimizer import _CompiledConditionalSearchSemantics
-from leanhebo.space import Categorical, Eq, Float, In, Integer, Space
+from leanhebo.space import Categorical, Eq, Float, GreaterEqual, In, Integer, Space
 
 
 def _config(*, random_samples: int, seed: int = 31) -> LeanHEBOConfig:
@@ -76,6 +76,26 @@ def test_xgboost_space_runs_one_global_conditional_gp_and_semantic_search() -> N
     population = optimizer.space.candidate_from_dense(optimizer.last_search.population)
     keys = optimizer.space.canonical_keys(population)
     assert len(keys) == len(set(keys))
+
+
+def test_unique_sobol_draws_skip_conditional_reachability(monkeypatch: pytest.MonkeyPatch) -> None:
+    optimizer = LeanHEBO(
+        Space(
+            Integer("iterations", 0, 4095),
+            Float("tail", 0.0, 1.0, active_when=GreaterEqual("iterations", 3900)),
+        ),
+        config=_config(random_samples=32, seed=826),
+    )
+
+    def unexpected(*args: object) -> bool:
+        raise AssertionError("a unique Sobol draw does not need finite completion")
+
+    monkeypatch.setattr(type(optimizer.space), "context_is_finite", unexpected)
+    first = optimizer.suggest(2)
+    optimizer.observe(first, [0.0, 1.0])
+    second = optimizer.suggest(2)
+    records = first.to_records() + second.to_records()
+    assert len({record["iterations"] for record in records}) == 4
 
 
 def test_fixed_child_makes_the_context_finite_without_forcing_its_parent() -> None:
