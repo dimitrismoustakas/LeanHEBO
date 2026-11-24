@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 import pytest
 import torch
@@ -456,6 +457,22 @@ def test_context_uses_compiled_precision_for_fixed_float_predicates() -> None:
         list(rounded_active.iter_contextual_records(fixed))
 
 
+def test_exhaustive_limit_can_reject_a_large_domain_before_enumeration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    space = Space(
+        *(Bool(f"b{i}") for i in range(20)), Integer("x", 1, 4, active_when=Eq("b0", True))
+    )
+    semantics = space.compile().conditional_semantics
+    assert semantics is not None
+
+    def unexpected(*args: object) -> None:
+        pytest.fail("all root assignments already exceed the limit")
+
+    monkeypatch.setattr(type(semantics), "_iter_contextual_records", unexpected)
+    assert semantics.bounded_records({}, 2048) is None
+
+
 def test_finiteness_ignores_parameters_outside_float_condition_ancestry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -467,7 +484,7 @@ def test_finiteness_ignores_parameters_outside_float_condition_ancestry(
     calls: list[str] = []
     original = conditional_module._finite_values
 
-    def tracked(parameter: ParameterLike) -> tuple[object, ...]:
+    def tracked(parameter: ParameterLike) -> Sequence[object]:
         calls.append(parameter.name)
         return original(parameter)
 

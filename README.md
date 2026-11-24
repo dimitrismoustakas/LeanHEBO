@@ -77,6 +77,13 @@ candidates = optimizer.suggest(8, fix_input={"use_bias": True})
 Non-finite outcomes are dropped by default. Set `nonfinite_policy="raise"` in
 `LeanHEBOConfig` to reject them instead.
 
+After the initial design, the default search scores every legal configuration when the
+current space or fixed-input context has at most 2,048 configurations. It uses the usual
+MACE Pareto front and batch selection. Larger and continuous domains use NSGA-II.
+Custom evolutionary settings select NSGA-II. Set `SearchConfig(exhaustive_limit=n)` to
+choose an explicit cutoff alongside those settings, or use `exhaustive_limit=0` for
+NSGA-II at every size.
+
 ## Conditional spaces
 
 Attach an `active_when` condition to each child parameter:

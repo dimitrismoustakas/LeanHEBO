@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import heapq
 import math
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from typing import Literal, TypeAlias, cast
 
 import torch
@@ -51,7 +52,7 @@ def _representative(parameter: ParameterLike) -> object:
     raise TypeError(f"unsupported parameter type {type(parameter).__name__}")
 
 
-def _finite_values(parameter: ParameterLike) -> tuple[object, ...]:
+def _finite_values(parameter: ParameterLike) -> Sequence[object]:
     if isinstance(parameter, Integer):
         if parameter.exponent:
             lower, upper = parameter.optimization_bounds
@@ -59,7 +60,7 @@ def _finite_values(parameter: ParameterLike) -> tuple[object, ...]:
                 int(parameter.base) ** exponent
                 for exponent in range(round(lower), round(upper) + 1)
             )
-        return tuple(range(parameter.low, parameter.high + 1, parameter.step))
+        return range(parameter.low, parameter.high + 1, parameter.step)
     if isinstance(parameter, Categorical):
         return tuple(parameter.categories)
     if isinstance(parameter, Bool):
@@ -67,6 +68,10 @@ def _finite_values(parameter: ParameterLike) -> tuple[object, ...]:
     if isinstance(parameter, Float):
         raise TypeError(f"parameter {parameter.name!r} has an infinite domain")
     raise TypeError(f"unsupported parameter type {type(parameter).__name__}")
+
+
+class _DomainExceedsLimit(Exception):
+    """An active parameter alone exceeds the bounded enumeration budget."""
 
 
 def _numeric_threshold(parameter: Float | Integer, value: float | int) -> float:
@@ -758,11 +763,32 @@ class ConditionalSemantics:
             raise ValueError("the contextual semantic domain is infinite")
         yield from self._iter_contextual_records(fixed_values)
 
+    def bounded_records(
+        self, fixed_values: Mapping[str, object], limit: int
+    ) -> list[dict[str, object]] | None:
+        """Return all legal configurations if they fit, stopping at the first proof otherwise."""
+        # Every combination of the always-active parameters has at least one legal completion.
+        remaining = limit
+        for parameter in self.parameters:
+            if parameter.active_when is None and parameter.name not in fixed_values:
+                if isinstance(parameter, Float):
+                    return None
+                choices = _finite_values(parameter)
+                if choices[remaining : remaining + 1]:
+                    return None
+                remaining //= len(choices)
+        try:
+            records = list(islice(self._iter_contextual_records(fixed_values, limit), limit + 1))
+        except _DomainExceedsLimit:
+            return None
+        return records if len(records) <= limit else None
+
     def _iter_contextual_records(
         self,
         fixed_values: Mapping[str, object],
+        limit: int | None = None,
     ) -> Iterator[dict[str, object]]:
-        """Yield records after the caller has established contextual finiteness."""
+        """Visit the active choices of each legal configuration in topological order."""
 
         values: dict[str, object] = {}
         state = _ContextState(self)
@@ -784,11 +810,14 @@ class ConditionalSemantics:
                 state.assign(parameter_index, value, active=False)
                 yield from generate(position + 1)
                 return
-            choices = (
-                (fixed_values[parameter.name],)
-                if parameter.name in fixed_values
-                else _finite_values(parameter)
-            )
+            if parameter.name in fixed_values:
+                choices: Sequence[object] = (fixed_values[parameter.name],)
+            else:
+                if limit is not None and isinstance(parameter, Float):
+                    raise _DomainExceedsLimit
+                choices = _finite_values(parameter)
+                if limit is not None and choices[limit : limit + 1]:
+                    raise _DomainExceedsLimit
             for value in choices:
                 values[parameter.name] = value
                 state.assign(parameter_index, value, active=True)

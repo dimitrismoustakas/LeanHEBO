@@ -155,7 +155,7 @@ class AcquisitionConfig:
 
 @dataclass(frozen=True, slots=True)
 class SearchConfig:
-    """Tensor-native NSGA-II controls."""
+    """Finite-domain acquisition and tensor-native NSGA-II controls."""
 
     population_size: int = 100
     generations: int = 100
@@ -167,8 +167,15 @@ class SearchConfig:
     eliminate_duplicates: bool = True
     reuse_previous_population: bool = False
     seed: int | None = None
+    exhaustive_limit: int | None = None
 
     def __post_init__(self) -> None:
+        if self.exhaustive_limit is not None and (
+            isinstance(self.exhaustive_limit, bool)
+            or not isinstance(self.exhaustive_limit, int)
+            or self.exhaustive_limit < 0
+        ):
+            raise ValueError("exhaustive_limit must be a non-negative integer or None")
         if self.population_size < 2:
             raise ValueError("population_size must be at least 2")
         if self.generations < 0:

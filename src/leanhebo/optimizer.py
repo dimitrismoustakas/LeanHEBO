@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from itertools import islice, tee
 from pathlib import Path
@@ -16,7 +16,7 @@ import torch
 
 from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator
 from leanhebo.checkpoint import load_checkpoint, save_checkpoint
-from leanhebo.config import LeanHEBOConfig
+from leanhebo.config import LeanHEBOConfig, SearchConfig
 from leanhebo.data import CandidateBatch, EncodedBatch
 from leanhebo.data.store import ObservationStore
 from leanhebo.diagnostics import Diagnostics, FitReport
@@ -27,6 +27,7 @@ from leanhebo.search.conditional import (
     ConditionalTorchNSGA2,
     eliminate_semantic_duplicates,
 )
+from leanhebo.search.duplicates import _exact_duplicate_mask
 from leanhebo.search.nsga2 import NSGA2Result, TorchNSGA2
 from leanhebo.search.repair import MixedVariableSpec
 from leanhebo.search.sorting import _non_dominated_sort_unchecked
@@ -69,6 +70,7 @@ class _CompiledConditionalSearchSemantics:
         fixed: FixedInput | None,
         *,
         device: torch.device,
+        finite_pool: EncodedBatch | None = None,
     ) -> None:
         semantics = space.conditional_semantics
         if semantics is None:
@@ -76,6 +78,7 @@ class _CompiledConditionalSearchSemantics:
         self.space = space
         self.fixed = fixed
         self._semantics = semantics
+        self._finite_pool = finite_pool
         self._completion_key: tuple[int, torch.device, torch.dtype] | None = None
         self._completion_batches: Iterator[torch.Tensor] = iter(())
         dense_parameter_indices = (
@@ -107,7 +110,14 @@ class _CompiledConditionalSearchSemantics:
             return completed
         key = (max(64, min(1024, count * 4)), existing.device, existing.dtype)
         if key != self._completion_key:
-            self._completion_batches = _finite_batches(self.space, self.fixed, *key)
+            if self._finite_pool is None:
+                self._completion_batches = _finite_batches(self.space, self.fixed, *key)
+            else:
+                dense = self._finite_pool.to_dense()
+                size = key[0]
+                self._completion_batches = (
+                    dense[start : start + size] for start in range(0, len(dense), size)
+                )
             self._completion_key = key
         # Each generation starts at the same first configuration. Replay the encoded
         # prefix and extend it only when this generation needs additional candidates.
@@ -171,6 +181,11 @@ class LeanHEBO:
         self._previous_population: torch.Tensor | None = None
         self._last_search: NSGA2Result | None = None
         self._base_search_spec = self._search_spec(None) if self.space.dense_dimension else None
+        search = self.config.search
+        self._exhaustive_limit = search.exhaustive_limit
+        if self._exhaustive_limit is None:
+            self._exhaustive_limit = 2048 if search == SearchConfig(seed=search.seed) else 0
+        self._finite_pools: dict[tuple[tuple[str, object], ...], EncodedBatch | None] = {}
 
     @property
     def random_samples(self) -> int:
@@ -243,6 +258,26 @@ class LeanHEBO:
         fixed = self.space.compile_fixed(value) if isinstance(value, Mapping) else value
         if fixed.space_fingerprint != self.space.fingerprint:
             raise ValueError("FixedInput belongs to a different design space")
+        if len(fixed.decoded_values) != len(fixed):
+            # A directly constructed FixedInput can contain only encoded assignments.
+            values = dict(fixed.decoded_values)
+            for parameters, indices, encoded in (
+                (
+                    self.space._continuous_parameters,
+                    fixed.continuous_indices,
+                    fixed.continuous_values,
+                ),
+                (
+                    self.space.categorical_parameters,
+                    fixed.categorical_indices,
+                    fixed.categorical_values,
+                ),
+            ):
+                for index, coordinate in zip(indices.tolist(), encoded, strict=True):
+                    parameter = parameters[index]
+                    if parameter.name not in values:
+                        values[parameter.name] = parameter.decode_values(coordinate.view(1))[0]
+            fixed = replace(fixed, decoded_values=tuple(values.items()))
         return fixed
 
     def _make_surrogate(self) -> ExactGPSurrogate:
@@ -331,20 +366,94 @@ class LeanHEBO:
             encoded = self.space._encoded_from_dense_unchecked(dense, fixed=search_fixed)
             return mace(encoded.continuous, encoded.categorical)
 
+        with self.diagnostics.phase("suggest.search.total"):
+            pool = self._finite_pool(fixed)
+            result = self._search_acquisition(objective, incumbent, fixed, pool)
+        self._last_search = result
+        self._previous_population = (
+            result.population.detach().clone()
+            if self.config.search.reuse_previous_population
+            else None
+        )
+        with self.diagnostics.phase("suggest.selection"):
+            exhausted = pool is None and result.generations < self.config.search.generations
+            selected = self._select_candidates(
+                result, n_suggestions, fixed, posterior, exhausted=exhausted
+            )
+        with self.diagnostics.phase("suggest.uniqueness"):
+            return self._fill_unique(selected, n_suggestions, fixed)
+
+    def _finite_pool(self, fixed: FixedInput | None) -> EncodedBatch | None:
+        limit = self._exhaustive_limit
+        if not limit:
+            return None
+        key = () if fixed is None else fixed.decoded_values
+        if key not in self._finite_pools:
+            fixed_values = dict(key)
+            semantics = self.space.conditional_semantics
+            if semantics is not None:
+                records = semantics.bounded_records(fixed_values, limit)
+            else:
+                flat = self._flat_finite_records(fixed_values, limit)
+                records = None if flat is None else list(flat)
+            pool = None
+            if records is not None:
+                pool = self.space.encode(records).to(self.device, dtype=self.dtype)
+                if fixed is not None:
+                    pool = self.space.apply_fixed(pool, fixed)
+                # Distinct large integers can coincide at the configured Torch precision.
+                duplicate = _exact_duplicate_mask(self.space.canonical_key_tensor(pool))
+                if bool(duplicate.any()):
+                    pool = pool.select((~duplicate).to(self.device))
+            # A changing fixed input needs at most one cached grid per optimizer.
+            self._finite_pools.clear()
+            self._finite_pools[key] = pool
+        return self._finite_pools[key]
+
+    def _flat_finite_records(
+        self, fixed_values: Mapping[str, object], limit: int | None = None
+    ) -> Iterator[dict[str, object]] | None:
+        axes = []
+        total = 1
+        for parameter in reversed(self.space.parameters):
+            size = self._finite_cardinality(parameter, fixed_values)
+            if size is None or (limit is not None and total * size > limit):
+                return None
+            axes.append((parameter, size, total))
+            total *= size
+        axes.reverse()
+        return (
+            {
+                parameter.name: self._finite_value(
+                    parameter, (ordinal // stride) % size, fixed_values
+                )
+                for parameter, size, stride in axes
+            }
+            for ordinal in range(total)
+        )
+
+    def _search_acquisition(
+        self,
+        objective: Callable[[torch.Tensor], torch.Tensor],
+        incumbent: CandidateBatch,
+        fixed: FixedInput | None,
+        pool: EncodedBatch | None,
+    ) -> NSGA2Result:
         if fixed is None:
             assert self._base_search_spec is not None
             search_spec = self._base_search_spec
         else:
             search_spec = self._search_spec(fixed)
+        config = self.config.search
         search_options: dict[str, Any] = {
-            "population_size": self.config.search.population_size,
-            "generations": self.config.search.generations,
-            "crossover_probability": self.config.search.crossover_probability,
-            "crossover_eta": self.config.search.crossover_eta,
-            "mutation_probability": self.config.search.mutation_probability,
-            "mutation_eta": self.config.search.mutation_eta,
-            "tournament_size": self.config.search.tournament_size,
-            "eliminate_duplicate_points": self.config.search.eliminate_duplicates,
+            "population_size": config.population_size if pool is None else len(pool),
+            "generations": config.generations if pool is None else 0,
+            "crossover_probability": config.crossover_probability,
+            "crossover_eta": config.crossover_eta,
+            "mutation_probability": config.mutation_probability,
+            "mutation_eta": config.mutation_eta,
+            "tournament_size": config.tournament_size,
+            "eliminate_duplicate_points": pool is not None or config.eliminate_duplicates,
         }
         search: TorchNSGA2
         if self.space.is_conditional:
@@ -354,31 +463,29 @@ class LeanHEBO:
                     self.space,
                     fixed,
                     device=self.device,
+                    finite_pool=pool,
                 ),
                 **search_options,
             )
         else:
             search = TorchNSGA2(search_spec, **search_options)
-        previous = (
-            self._previous_population if self.config.search.reuse_previous_population else None
-        )
-        with self.diagnostics.phase("suggest.search.total"):
-            result = search.minimize(
-                objective,
-                incumbents=self.space.to_dense(incumbent),
-                initial_population=previous,
-                generator=self.random.search,
+        initial = self._previous_population if config.reuse_previous_population else None
+        incumbents: torch.Tensor | None = self.space.to_dense(incumbent)
+        if pool is not None and not self.space.is_conditional:
+            lattice = (
+                search_spec.integer_mask | search_spec.categorical_mask | search_spec.fixed_mask
             )
-        self._last_search = result
-        self._previous_population = (
-            result.population.detach().clone()
-            if self.config.search.reuse_previous_population
-            else None
+            if not bool(lattice.all()):
+                # A flat log-integer has a continuous latent coordinate, so Sobol
+                # rows alone can give the same physical integer multiple scores.
+                initial = pool.to_dense()
+                incumbents = None
+        return search.minimize(
+            objective,
+            incumbents=incumbents,
+            initial_population=initial,
+            generator=self.random.search,
         )
-        with self.diagnostics.phase("suggest.selection"):
-            selected = self._select_candidates(result, n_suggestions, fixed, posterior)
-        with self.diagnostics.phase("suggest.uniqueness"):
-            return self._fill_unique(selected, n_suggestions, fixed)
 
     def _incumbent(self, fixed: FixedInput | None) -> CandidateBatch:
         observations = self.store._materialize_view()
@@ -472,10 +579,11 @@ class LeanHEBO:
         count: int,
         fixed: FixedInput | None,
         posterior: PosteriorEvaluator,
+        *,
+        exhausted: bool,
     ) -> EncodedBatch:
         # An exhausted search has no distinct offspring left. Otherwise, use Sobol
         # for any slots the first front leaves open so the batch explores new points.
-        exhausted = result.generations < self.config.search.generations
         order = (
             torch.argsort(result.ranks, stable=True)
             if exhausted
@@ -648,68 +756,15 @@ class LeanHEBO:
         if requested == 0:
             return []
         if self.space.is_conditional:
-            return self._conditional_finite_unseen(requested, fixed, seen)
-        fixed_values = {} if fixed is None else dict(fixed.decoded_values)
-        cardinalities: list[int] = []
-        for parameter in self.space.parameters:
-            cardinality = self._finite_cardinality(parameter, fixed_values)
-            if cardinality is None:
+            records = self.space.iter_contextual_records(fixed)
+        else:
+            flat = self._flat_finite_records({} if fixed is None else dict(fixed.decoded_values))
+            if flat is None:
                 return []
-            cardinalities.append(cardinality)
-
+            records = flat
         blocked = set(self.store.key_snapshot()) | seen
         completed: list[EncodedBatch] = []
         completed_count = 0
-        total = math.prod(cardinalities)
-        chunk_size = max(64, min(1024, requested * 4))
-        for start in range(0, total, chunk_size):
-            records: list[dict[str, object]] = []
-            for ordinal in range(start, min(start + chunk_size, total)):
-                remainder = ordinal
-                indices = [0] * len(cardinalities)
-                for position in range(len(cardinalities) - 1, -1, -1):
-                    remainder, indices[position] = divmod(remainder, cardinalities[position])
-                records.append(
-                    {
-                        parameter.name: self._finite_value(
-                            parameter,
-                            index,
-                            fixed_values,
-                        )
-                        for parameter, index in zip(
-                            self.space.parameters,
-                            indices,
-                            strict=True,
-                        )
-                    }
-                )
-            encoded = self.space.encode(records).to(self.device, dtype=self.dtype)
-            keep: list[int] = []
-            for index, key in enumerate(self.space.canonical_keys(encoded)):
-                if key in blocked:
-                    continue
-                keep.append(index)
-                blocked.add(key)
-                seen.add(key)
-                if len(keep) + completed_count == requested:
-                    break
-            if keep:
-                completed.append(encoded.select(keep))
-                completed_count += len(keep)
-            if completed_count == requested:
-                break
-        return completed
-
-    def _conditional_finite_unseen(
-        self,
-        requested: int,
-        fixed: FixedInput | None,
-        seen: set[tuple[int, ...]],
-    ) -> list[EncodedBatch]:
-        blocked = set(self.store.key_snapshot()) | seen
-        completed: list[EncodedBatch] = []
-        completed_count = 0
-        records = self.space.iter_contextual_records(fixed)
         chunk_size = max(64, min(1024, requested * 4))
         while completed_count < requested:
             chunk = list(islice(records, chunk_size))
@@ -842,6 +897,9 @@ class LeanHEBO:
         state = load_checkpoint(path, map_location=map_location)
         try:
             config = LeanHEBOConfig.from_dict(state["config"])
+            if "exhaustive_limit" not in state["config"].get("search", {}):
+                # Older checkpoints were optimizing the acquisition with NSGA-II.
+                config = replace(config, search=replace(config.search, exhaustive_limit=0))
             if map_location is not None:
                 config = replace(
                     config,

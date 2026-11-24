@@ -12,6 +12,7 @@ import torch
 
 from leanhebo import LeanHEBO
 from leanhebo.acquisition import MACEEvaluator, PosteriorEvaluator, PosteriorStats
+from leanhebo.checkpoint import save_checkpoint
 from leanhebo.config import (
     AcquisitionConfig,
     GPConfig,
@@ -23,7 +24,7 @@ from leanhebo.config import (
 from leanhebo.data import CandidateBatch, EncodedBatch
 from leanhebo.errors import NumericalError, SearchSpaceExhaustedError
 from leanhebo.gp import ExactGPSurrogate
-from leanhebo.space import Bool, Categorical, CompiledSpace, FixedInput, Float, Integer, Space
+from leanhebo.space import Bool, Categorical, CompiledSpace, Eq, FixedInput, Float, Integer, Space
 
 
 def _space() -> Space:
@@ -276,6 +277,116 @@ def test_integrated_mace_evaluates_each_candidate_chunk_once(
     for candidate_count, posterior_calls in events:
         assert posterior_calls == math.ceil(candidate_count / 3)
     assert optimizer.diagnostics.counters["posterior.calls"] == sum(calls for _, calls in events)
+
+
+def test_default_search_scores_every_legal_log_integer_once() -> None:
+    optimizer = LeanHEBO(
+        Space(Integer("x", 3, 19, log=True), Bool("flag")),
+        config=replace(_config(), search=SearchConfig()),
+    )
+    optimizer.observe([{"x": v, "flag": False} for v in (3, 8, 18)], [0.0, 1.0, 2.0])
+    optimizer.suggest(2)
+    result = optimizer.last_search
+    assert result is not None
+    assert (result.generations, result.objective_calls, result.candidate_evaluations) == (0, 1, 34)
+    rows = optimizer.space.candidate_from_dense(result.population).to_records()
+    assert {(row["x"], row["flag"]) for row in rows} == {
+        (x, flag) for x in range(3, 20) for flag in (False, True)
+    }
+
+
+def test_automatic_conditional_search_replays_one_full_native_population() -> None:
+    space = Space(Bool("on"), Integer("x", 1, 5, active_when=Eq("on", True)), Integer("k", 0, 2))
+    config = replace(_config(), search=SearchConfig())
+    automatic = LeanHEBO(space, config=config)
+    explicit = LeanHEBO(
+        space, config=replace(config, search=SearchConfig(population_size=18, generations=0))
+    )
+    for count in (1, 1, 1, 1, 3, 1):
+        a, b = automatic.suggest(count), explicit.suggest(count)
+        assert a.to_records() == b.to_records()
+        loss = a.continuous.sum(dim=1)
+        automatic.observe(a, loss)
+        explicit.observe(b, loss)
+    assert automatic.last_search is not None and automatic.last_search.candidate_evaluations == 18
+
+
+def test_exact_search_uses_global_front_then_sobol(monkeypatch: pytest.MonkeyPatch) -> None:
+    optimizer = LeanHEBO(
+        Space(Integer("x", 0, 20)), config=replace(_config(), search=SearchConfig())
+    )
+    optimizer.observe([{"x": v} for v in (0, 1, 2)], [0.0, 1.0, 2.0])
+
+    # The only global front member has already been measured.
+    def scores(
+        self: MACEEvaluator, continuous: torch.Tensor, categorical: torch.Tensor
+    ) -> torch.Tensor:
+        return continuous.expand(-1, 3)
+
+    monkeypatch.setattr(MACEEvaluator, "__call__", scores)
+    assert len(optimizer.suggest(2)) == 2
+    assert optimizer._sobol_draw_count == 2
+
+
+def test_exhaustive_cutoff_uses_the_current_conditional_context() -> None:
+    space = Space(
+        Bool("enabled"),
+        Integer("choice", 1, 4, active_when=Eq("enabled", False)),
+        Float("rate", 0, 1, active_when=Eq("enabled", True)),
+    )
+    optimizer = LeanHEBO(
+        space,
+        config=replace(
+            _config(),
+            search=SearchConfig(
+                population_size=3,
+                generations=1,
+                exhaustive_limit=4,
+            ),
+        ),
+    )
+    optimizer.observe(
+        [
+            {"enabled": True, "rate": 0.2},
+            {"enabled": True, "rate": 0.5},
+            {"enabled": False, "choice": 2},
+        ],
+        [0.3, 0.5, 0.1],
+    )
+    optimizer.suggest(fix_input={"enabled": False})
+    result = optimizer.last_search
+    assert result is not None and result.candidate_evaluations == 4 and result.generations == 0
+    # Fixing a child leaves its parent free, giving four discrete points plus one active rate.
+    optimizer.suggest(fix_input={"rate": 0.7})
+    assert optimizer.last_search is not None and optimizer.last_search.generations == 1
+    optimizer.suggest(fix_input={"enabled": False, "choice": 1})
+    result = optimizer.last_search
+    assert result is not None and result.candidate_evaluations == 1
+
+
+def test_encoded_only_fixed_context_does_not_reuse_the_unrestricted_grid() -> None:
+    opt = LeanHEBO(
+        Space(Bool("flag"), Integer("x", 1, 4)), config=replace(_config(), search=SearchConfig())
+    )
+    opt.observe([{"flag": False, "x": x} for x in (1, 2, 3)], [1.0, 2.0, 3.0])
+    opt.suggest(fix_input=replace(opt.space.compile_fixed({"flag": True}), decoded_values=()))
+    assert opt.last_search is not None and opt.last_search.candidate_evaluations == 4
+    opt.suggest()
+    assert opt.last_search is not None and opt.last_search.candidate_evaluations == 8
+
+
+def test_old_checkpoints_resume_evolutionary_search(tmp_path: Path) -> None:
+    space = Space(Integer("x", 0, 199))
+    optimizer = LeanHEBO(space, config=replace(_config(), search=SearchConfig(exhaustive_limit=0)))
+    optimizer.observe([{"x": v} for v in (2, 23, 184)], [0.1, 1.0, 0.5])
+    state = optimizer._checkpoint_state()
+    del state["config"]["search"]["exhaustive_limit"]
+    path = tmp_path / "old.leanhebo"
+    save_checkpoint(path, state)
+    restored = LeanHEBO.load(path)
+    assert restored.config.search.exhaustive_limit == 0
+    assert restored.suggest().to_records() == optimizer.suggest().to_records()
+    assert restored.last_search is not None and restored.last_search.generations > 0
 
 
 def test_batch_uses_pareto_fronts_of_the_unseen_population(monkeypatch: pytest.MonkeyPatch) -> None:

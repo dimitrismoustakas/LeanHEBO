@@ -48,6 +48,7 @@ def test_unknown_top_level_configuration_field_is_rejected() -> None:
         (lambda: WarpConfig(lambda_lower_bound=float("nan")), "lambda bounds"),
         (lambda: AcquisitionConfig(kappa=float("nan")), "kappa"),
         (lambda: SearchConfig(population_size=1), "population_size"),
+        (lambda: SearchConfig(exhaustive_limit=-1), "exhaustive_limit"),
         (lambda: LeanHEBOConfig(random_samples=1), "random_samples"),
     ],
 )
