@@ -8,7 +8,6 @@ import heapq
 import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from itertools import islice
 from typing import Literal, TypeAlias, cast
 
 import torch
@@ -68,10 +67,6 @@ def _finite_values(parameter: ParameterLike) -> Sequence[object]:
     if isinstance(parameter, Float):
         raise TypeError(f"parameter {parameter.name!r} has an infinite domain")
     raise TypeError(f"unsupported parameter type {type(parameter).__name__}")
-
-
-class _DomainExceedsLimit(Exception):
-    """An active parameter alone exceeds the bounded enumeration budget."""
 
 
 def _numeric_threshold(parameter: Float | Integer, value: float | int) -> float:
@@ -755,41 +750,89 @@ class ConditionalSemantics:
                 return False
         return True
 
-    def iter_contextual_records(
-        self,
-        fixed_values: Mapping[str, object],
-    ) -> Iterator[dict[str, object]]:
-        if not self.context_is_finite(fixed_values):
-            raise ValueError("the contextual semantic domain is infinite")
-        yield from self._iter_contextual_records(fixed_values)
-
     def bounded_records(
         self, fixed_values: Mapping[str, object], limit: int
     ) -> list[dict[str, object]] | None:
         """Return all legal configurations if they fit, stopping at the first proof otherwise."""
+        if limit < 1:
+            return None
         # Every combination of the always-active parameters has at least one legal completion.
         remaining = limit
         for parameter in self.parameters:
             if parameter.active_when is None and parameter.name not in fixed_values:
                 if isinstance(parameter, Float):
                     return None
-                choices = _finite_values(parameter)
-                if choices[remaining : remaining + 1]:
+                root_choices = _finite_values(parameter)
+                if root_choices[remaining : remaining + 1]:
                     return None
-                remaining //= len(choices)
-        try:
-            records = list(islice(self._iter_contextual_records(fixed_values, limit), limit + 1))
-        except _DomainExceedsLimit:
-            return None
-        return records if len(records) <= limit else None
+                remaining //= len(root_choices)
+        encoded = EncodedBatch(
+            self.continuous_representatives[None, :].clone(),
+            self.categorical_representatives[None, :].clone(),
+        )
+        # Predicates use compiled precision. Keep the physical choices for the
+        # returned records, with a negative ordinal marking an inactive parameter.
+        axes: list[Sequence[object]] = [()] * len(self.parameters)
+        ordinals = torch.full((1, len(self.parameters)), -1, dtype=torch.int64)
+        for index in self.topological_order:
+            parameter = self.parameters[index]
+            program = self.programs[index]
+            active = (
+                torch.ones(len(encoded), dtype=torch.bool)
+                if program is None
+                else program.evaluate(encoded, ordinals >= 0, {})
+            )
+            count = int(active.sum().item())
+            if not count:
+                continue
+            if parameter.name in fixed_values:
+                choices: Sequence[object] = (fixed_values[parameter.name],)
+            elif isinstance(parameter, Float):
+                return None
+            else:
+                choices = _finite_values(parameter)
+            # Every prefix has a legal completion. Expanding this axis adds
+            # count * (width - 1) rows, so the cap can be checked before allocation.
+            max_width = 1 + (limit - len(encoded)) // count
+            if choices[max_width : max_width + 1]:
+                return None
+            axes[index] = choices
+            width = len(choices)
+            if width > 1:
+                repeats = 1 + active.to(torch.int64) * (width - 1)
+                parents = torch.arange(len(encoded)).repeat_interleave(
+                    repeats, output_size=len(encoded) + count * (width - 1)
+                )
+                encoded = encoded.select(parents)
+                ordinals = ordinals.index_select(0, parents)
+                active = active[parents]
+            ordinals[active, index] = torch.arange(width).repeat(count)
+            if not _is_static(parameter):
+                values = parameter.encode_values(list(choices), dtype=self.dtype).repeat(count)
+                if parameter.is_categorical:
+                    column = self.categorical_parameter_indices.index(index)
+                    encoded.categorical[active, column] = values.to(torch.int64)
+                else:
+                    column = self.continuous_parameter_indices.index(index)
+                    encoded.continuous[active, column] = values
+        # Parent-major expansion preserves the order of the streaming enumerator.
+        return [
+            {
+                parameter.name: axis[ordinal]
+                for parameter, axis, ordinal in zip(self.parameters, axes, row, strict=True)
+                if ordinal >= 0
+            }
+            for row in ordinals.tolist()
+        ]
 
-    def _iter_contextual_records(
+    def iter_contextual_records(
         self,
         fixed_values: Mapping[str, object],
-        limit: int | None = None,
     ) -> Iterator[dict[str, object]]:
         """Visit the active choices of each legal configuration in topological order."""
 
+        if not self.context_is_finite(fixed_values):
+            raise ValueError("the contextual semantic domain is infinite")
         values: dict[str, object] = {}
         state = _ContextState(self)
 
@@ -813,11 +856,7 @@ class ConditionalSemantics:
             if parameter.name in fixed_values:
                 choices: Sequence[object] = (fixed_values[parameter.name],)
             else:
-                if limit is not None and isinstance(parameter, Float):
-                    raise _DomainExceedsLimit
                 choices = _finite_values(parameter)
-                if limit is not None and choices[limit : limit + 1]:
-                    raise _DomainExceedsLimit
             for value in choices:
                 values[parameter.name] = value
                 state.assign(parameter_index, value, active=True)

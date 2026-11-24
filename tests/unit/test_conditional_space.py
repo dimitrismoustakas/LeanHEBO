@@ -469,8 +469,50 @@ def test_exhaustive_limit_can_reject_a_large_domain_before_enumeration(
     def unexpected(*args: object) -> None:
         pytest.fail("all root assignments already exceed the limit")
 
-    monkeypatch.setattr(type(semantics), "_iter_contextual_records", unexpected)
+    monkeypatch.setattr(conditional_module, "EncodedBatch", unexpected)
     assert semantics.bounded_records({}, 2048) is None
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_bounded_grid_matches_ordered_stream_at_the_exact_limit(dtype: torch.dtype) -> None:
+    space = Space(
+        Integer("last", 1, 3, active_when=GreaterThan("threshold", 0.5)),
+        Categorical("mode", ("a", "b")),
+        Integer("weight", 1, 5, log=True, active_when=Eq("mode", "a")),
+        Integer("steps", 2, 6, step=2),
+        Bool("flag", active_when=All(GreaterThan("weight", 2), GreaterThan("steps", 2))),
+        Float("threshold", 0.0, 1.0, active_when=Any(Eq("flag", True), Eq("mode", "b"))),
+        Categorical("constant", (None,), active_when=Eq("mode", "b")),
+    ).compile(dtype=dtype)
+    semantics = _semantics(space)
+    assert semantics.bounded_records({}, 8192) is None
+    for fixed in ({"threshold": 0.50000001}, {"threshold": 0.75, "mode": "b"}):
+        expected = list(semantics.iter_contextual_records(fixed))
+        assert semantics.bounded_records(fixed, len(expected)) == expected
+        assert semantics.bounded_records(fixed, len(expected) - 1) is None
+
+
+def test_oversized_conditional_branch_does_not_encode_individual_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    grid = Eq("branch", "grid")
+    space = Space(
+        Categorical("branch", ("grid", "real")),
+        Integer("x", 0, 63, active_when=grid),
+        Integer("y", 0, 127, active_when=grid),
+        Float("tail", 0.0, 1.0, active_when=Eq("branch", "real")),
+    ).compile()
+    calls = 0
+    encode = Integer.encode_values
+
+    def counted(self: Integer, values: list[object], *, dtype: torch.dtype) -> torch.Tensor:
+        nonlocal calls
+        calls += 1
+        assert calls <= 2
+        return encode(self, values, dtype=dtype)
+
+    monkeypatch.setattr(Integer, "encode_values", counted)
+    assert _semantics(space).bounded_records({}, 2048) is None
 
 
 def test_finiteness_ignores_parameters_outside_float_condition_ancestry(
