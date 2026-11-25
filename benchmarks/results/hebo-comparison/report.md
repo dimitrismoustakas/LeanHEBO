@@ -1,10 +1,10 @@
 # HEBO comparison
 
-Historical comparison: LeanHEBO 0.3.0 and HEBO 0.3.6 on 13 flat CARP-S tasks, 20 seeds per task, one CPU thread. These runs predate LeanHEBO 0.5.0.
+We compared LeanHEBO 0.3.0 and HEBO 0.3.6 on 13 flat CARP-S tasks with 20 seeds per task. Each run used one CPU thread.
 
 Win probability compares every optimizer run with every HEBO run on the same task, counts ties as half, then averages tasks equally. 50% is neutral. Anytime probability averages 20 budget fractions from 5% to 100%. This measures how often an optimizer wins; task costs show the size of the differences.
 
-Failed runs retain their best evaluated cost for the remaining budget. Timing uses only task/seed pairs completed by every compared optimizer. Intervals in task plots are interquartile ranges, not confidence intervals.
+Failed runs retain their best evaluated cost for the remaining budget. Timing uses only task/seed pairs completed by every compared optimizer. In the task plots, the shaded bands show the middle 50% of runs at each budget.
 
 | Optimizer | Final win vs HEBO | Anytime win vs HEBO | Median ask + tell (s) | HEBO/optimizer | Failed runs |
 |---|---:|---:|---:|---:|---:|

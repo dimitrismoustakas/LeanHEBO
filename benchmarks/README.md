@@ -1,8 +1,8 @@
 # Benchmarks
 
-[HEBO comparison](results/hebo-comparison/report.md): LeanHEBO 0.3.0 versus HEBO 0.3.6,
-13 flat CARP-S tasks, 20 seeds. All 520 attempts are included; HEBO's three failed
-LCBench runs retain their best evaluated point. This is a historical result.
+The [HEBO comparison](results/hebo-comparison/report.md) covers LeanHEBO 0.3.0 and HEBO 0.3.6
+on 13 flat CARP-S tasks with 20 seeds per task. It includes all 520 runs, using the best observed
+cost for each of HEBO's three failed LCBench runs.
 
 ## Run and compare
 
@@ -30,9 +30,8 @@ Any sequential, single-objective CARP-S adapter can use the same runner and anal
 
 Pass a list with `--tasks`; each entry needs only `name` and `n_trials`.
 
-- [Development](carps/development_tasks.json), the default: 13 tasks, including four 8D BBOB
-  problems and conditional YAHPO spaces. The retained one-seed pilot supports further screening;
-  LCBench `168335` still needs a HEBO comparison before deciding whether to replace it.
+- [Development](carps/development_tasks.json) is the default set of 13 tasks. It includes four
+  8D BBOB problems and conditional YAHPO spaces.
 - [Flat comparison](carps/tasks.json): the original 13-task CARP-S test selection.
 - [Conditional holdout](carps/conditional_tasks.json): five SVM/XGBoost tasks.
 - [Classifier selection](carps/classifier_tasks.json) trains four alternative learners on the
@@ -53,11 +52,11 @@ runs within each task, count ties as half, then average tasks equally. 50% is ne
 probability averages 20 budget fractions from 5% to 100%. This uses the
 [probability of improvement](https://github.com/google-research/rliable#probability-of-improvement)
 metric; it measures how often an optimizer wins without normalizing task costs.
-Per-task plots show median and interquartile range of native cost, or regret against the known
-optimum for BBOB and synthetic tasks. The table also gives median paired cost differences.
+Per-task plots show median cost, or median regret against the known optimum for BBOB and
+synthetic tasks. The shaded bands show the middle 50% of runs at each budget. The table also
+gives median paired cost differences.
 
 Failed runs carry their best evaluated cost through the remaining budget and count as failures.
 A run with no evaluated point has infinite cost. Timing includes only task/seed pairs completed
-by every compared optimizer; speedup is the median of paired time ratios. These are descriptive
-comparisons, with no confidence interval or significance claim. Analysis requires the same tasks,
-seeds, budgets, and objectives across optimizers.
+by every compared optimizer. Speedup is the median of paired time ratios. Analysis requires the
+same tasks, seeds, budgets, and objectives across optimizers.

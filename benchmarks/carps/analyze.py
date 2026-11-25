@@ -122,7 +122,7 @@ def summarize(runs: list[Run], reference: str) -> tuple[pd.DataFrame, pd.DataFra
         "",
         "Failed runs retain their best evaluated cost for the remaining budget. "
         "Timing uses only task/seed pairs completed by every compared optimizer. "
-        "Intervals in task plots are interquartile ranges, not confidence intervals.",
+        "In the task plots, the shaded bands show the middle 50% of runs at each budget.",
         "",
         f"| Optimizer | Final win vs {reference} | Anytime win vs {reference} | "
         "Paired final W/T/L | Paired anytime win | Median ask + tell (s) | "
