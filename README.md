@@ -1,13 +1,12 @@
 # LeanHEBO
 
-LeanHEBO implements the single-objective, exact-GP path of HEBO with Torch-backed numerical
-state and compute. It supports bounded floats (linear or logarithmic), integers (linear, stepped,
-logarithmic, or powers of a base), Boolean values, and categorical variables, including conditional
-dependencies, batched suggestions, and contextual values.
+LeanHEBO is a PyTorch implementation of HEBO. It uses an exact Gaussian process to minimize a
+single unconstrained objective. Search spaces can contain bounded floats (linear or logarithmic),
+integers (linear, stepped, logarithmic, or powers of a base), Boolean values, and categories.
+Parameters can depend on other choices, and you can request a batch of suggestions with some
+inputs fixed.
 
-This is an independent alpha project, not a new optimization algorithm and not affiliated with
-Huawei. See [NOTICE.md](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/NOTICE.md)
-for provenance.
+Upstream attribution is in [NOTICE.md](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/NOTICE.md).
 
 ## Install
 
@@ -19,9 +18,8 @@ python -m pip install leanhebo
 uv add leanhebo
 ```
 
-CPU is the release-tested path. CUDA can be selected with `RuntimeConfig(device="cuda")`, but it
-is experimental and is not tested end to end in CI. It never silently falls back from the
-configured device.
+CPU is the default device and the one used for release testing. Set `RuntimeConfig(device="cuda")`
+to use experimental CUDA support.
 
 ## Quick start
 
@@ -114,7 +112,7 @@ Numerical observations, transformations, GP state, acquisition evaluation, rando
 evolutionary populations use Torch. The exact GP persists across ordinary updates. Both `float32`
 and `float64` are supported.
 
-LeanHEBO does not change process-wide Torch or BLAS thread counts on import.
+LeanHEBO uses the process’s Torch and BLAS thread settings.
 
 Save and resume without pickling user functions:
 
@@ -126,21 +124,8 @@ restored = LeanHEBO.load("run.leanhebo", map_location="cpu")
 The checkpoint restores observations, transformations, model and optimizer state, Sobol progress,
 and independent Torch generator states.
 
-## Scope
+## Benchmarks
 
-The `LeanHEBO` optimizer accepts one unconstrained objective and uses an exact Gaussian process,
-MACE, and mixed-variable NSGA-II. It does not provide user-facing multi-objective optimization,
-random forests, CatBoost, neural ensembles, or sparse GPs.
-
-The supported public API is the top-level optimizer and configuration classes plus the types in
-`leanhebo.space` and `leanhebo.data`. Lower-level search, GP, acquisition, transform, and runtime
-modules are implementation details.
-
-The repository does not yet claim general speed or optimization-quality superiority. See the
-[benchmark README](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/benchmarks/README.md)
-for the existing HEBO comparison and commands for new CARP-S runs.
-
-## Development
-
-See [CONTRIBUTING.md](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/CONTRIBUTING.md)
-for setup and checks.
+The comparison of LeanHEBO 0.3.0 and HEBO 0.3.6 covers 13 CARP-S tasks with 20 seeds per task.
+For results and commands, see the
+[benchmark guide](https://github.com/dimitrismoustakas/LeanHEBO/blob/main/benchmarks/README.md).
